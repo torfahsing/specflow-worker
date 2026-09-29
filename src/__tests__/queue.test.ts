@@ -31,7 +31,6 @@ function makeStubPb() {
   // Mutable state for getFullList
   let getFullListResult: any[] = []
   let getFullListThrows = false
-  let capturedGetFullListOpts: any = null
 
   // Mutable state for subscribe
   let subscribeResult: (() => Promise<void>) | null = null
@@ -51,7 +50,6 @@ function makeStubPb() {
     },
     getFullList(opts?: any) {
       calls.getFullList++
-      capturedGetFullListOpts = opts
       if (getFullListThrows) throw new Error('network error')
       return Promise.resolve(getFullListResult)
     },
@@ -75,7 +73,7 @@ function makeStubPb() {
   return {
     pb: pb as unknown as PocketBase,
     calls,
-    get capturedGetFullListOpts() { return capturedGetFullListOpts },
+    taskCollection,
     setGetOneResult(v: any) { getOneResult = v },
     setGetOneThrows(v: boolean) { getOneThrows = v },
     setUpdateThrows(v: boolean) { updateThrows = v },
@@ -268,22 +266,32 @@ describe('subscribeToQueued', () => {
 describe('drainQueued', () => {
   it('returns task ids oldest-first with the correct filter/sort/expand', async () => {
     const stub = makeStubPb()
-    const { pb, calls } = stub
-    const taskColl = (pb as any).collection('tasks')
-    taskColl.getFullList = async (opts?: any) => {
-      // Capture opts for verification
-      ;(stub as any).capturedGetFullListOpts = opts
-      return [
-        { id: 'task_old' },
-        { id: 'task_new' },
-      ]
-    }
+    const { pb, calls, taskCollection } = stub
+
+    // Wrap getFullList to capture options before delegating.
+    // We replace the function via Object.defineProperty to avoid
+    // Bun-test's property-assignment guards.
+    let capturedOpts: any = null
+    const origGetFullList = taskCollection.getFullList.bind(taskCollection)
+    Object.defineProperty(taskCollection, 'getFullList', {
+      value: async (opts?: any) => {
+        capturedOpts = opts
+        return origGetFullList(opts)
+      },
+      writable: true,
+      configurable: true,
+    })
+
+    stub.setGetFullListResult([
+      { id: 'task_old' },
+      { id: 'task_new' },
+    ])
 
     const ids = await drainQueued(pb)
 
     expect(ids).toEqual(['task_old', 'task_new'])
     expect(calls.getFullList).toBe(1)
-    expect((stub as any).capturedGetFullListOpts).toEqual({
+    expect(capturedOpts).toEqual({
       filter: QUEUED_FILTER,
       sort: 'created',
       expand: 'feature',
