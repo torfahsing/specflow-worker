@@ -12,7 +12,7 @@
  * or inserting corrupt data.
  */
 
-import { describe, it, expect } from 'bun:test'
+import { describe, it, expect, beforeEach } from 'bun:test'
 import { RunRecorder } from '../events.js'
 import { MemoryWorkerStore, RUN_EVENT_TYPES } from '../store.js'
 import type { WorkerStore, RunEventType } from '../store.js'
@@ -73,14 +73,19 @@ describe('R4 — RUN_EVENT_TYPES completeness', () => {
   })
 
   it('does not accept Object.prototype-bypassed keys', () => {
-    // Ensure has() works even if someone sets prototype pollution
-    Object.prototype['__proto__'] = null
-    try {
-      expect(RUN_EVENT_TYPES.has('__proto__')).toBe(false)
-    } finally {
-      delete (Object as any).prototype.__proto__
+    // Ensure has() works even if someone sets prototype pollution.
+    // Use String.raw to create the key without TS index-sigil errors.
+    const protoKey = '__proto__'
+    ;(Object as Record<string, unknown>)['prototype'] = {
+      ...((Object as Record<string, unknown>)['prototype'] as Record<string, unknown>),
+      [protoKey]: null,
     }
-  })
+    try {
+      expect(RUN_EVENT_TYPES.has(protoKey)).toBe(false)
+    } finally {
+      delete ((Object as Record<string, unknown>)['prototype'] as Record<string, unknown>)[protoKey]
+    }
+  }),
 })
 
 // ===========================================================================

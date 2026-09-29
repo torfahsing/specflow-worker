@@ -55,16 +55,19 @@ function makeClaimedTask(overrides: Record<string, unknown> = {}): ClaimedTask {
 
 /**
  * Stub Presence that tracks setBusy calls and returns a fixed workerId.
- * Extends Presence for structural compatibility with the RunDeps type.
+ * Does not extend Presence (which requires PocketBase + name args);
+ * relies on TypeScript structural subtyping — any object with the
+ * same public surface is accepted as `Presence`.
  */
-class StubPresence extends Presence {
+class StubPresence {
   workerId = 'worker_abc'
   busyCalls: boolean[] = []
   setBusy(busy: boolean): void {
     this.busyCalls.push(busy)
   }
-  async ensure(): Promise<string> {
-    return this.workerId
+  // eslint-disable-next-line @typescript-eslint/no-unused-vars
+  ensure(_workerName?: string): Promise<string> {
+    return Promise.resolve(this.workerId)
   }
   start(): void {}
   async stop(): Promise<void> {}

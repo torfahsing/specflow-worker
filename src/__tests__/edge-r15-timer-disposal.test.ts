@@ -135,7 +135,7 @@ describe('R15 — Presence timer disposal', () => {
     let unrefCalled = false
     const origSetInterval = global.setInterval
     global.setInterval = (...args: any[]) => {
-      const timer = origSetInterval(...args)
+      const timer = (origSetInterval as any).apply(null, args)
       const origUnref = timer.unref.bind(timer)
       timer.unref = () => {
         unrefCalled = true

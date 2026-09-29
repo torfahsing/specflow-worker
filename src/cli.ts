@@ -119,7 +119,7 @@ export async function main(argv: string[]): Promise<void> {
   // Step 7: work-loop state
   // -------------------------------------------------------------------------
   const pending = new Set<string>()
-  let activePromise: Promise<void> | null = null
+  let activePromise: Promise<unknown> | null = null
   let shuttingDown = false
   let unsub: (() => Promise<void>) | null = null
   let stopRealtimeConnect: (() => void) | null = null

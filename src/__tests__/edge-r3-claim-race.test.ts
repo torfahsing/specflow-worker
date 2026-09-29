@@ -173,9 +173,7 @@ describe('R3 — claim-task lost-race immutability', () => {
           return {
             getOne: async () => {
               // Always return the initial state
-              return { id: 't1', status: 'queued', assigne
-
-d_worker: null, expand: {} }
+              return { id: 't1', status: 'queued', assigned_worker: null, expand: {} }
             },
             update: async (_id: string, data: any) => {
               return { id: 't1', ...data }

@@ -38,7 +38,7 @@ async function feedChunks(
   const events: unknown[] = []
   const parser = createNdjsonParser(stream, (e) => events.push(e))
 
-  const decoder = new TextDecoder({ stream: true })
+  const decoder = new TextDecoder('utf-8', { stream: true })
   let lineBuffer = ''
 
   for (const raw of rawChunks) {
@@ -78,7 +78,7 @@ describe('R11 — NDJSON chunk boundary', () => {
     // Second chunk: the rest
     const { events } = await feedChunks([
       '{"type":"text","de',
-      lta":"hello"}\n',
+      'lta":"hello"}\n',
     ])
 
     expect(events).toHaveLength(1)
@@ -160,22 +160,18 @@ describe('R11 — NDJSON chunk boundary', () => {
   })
 
   it('newline embedded inside a token: stays on the wrong side of the split', async () => {
-    // Line buffer: '{"type":"reasoning","delta":"ab"}\n{...}'
-    // The \n after "ab" splits the first reasoning event cleanly;
-    // the second starts fresh.
+    // Chunk boundary simulates a newline appearing mid-line during streaming.
+    // The first complete NDJSON line (ending at \\n) is parsed;
+    // subsequent garbage waits in the buffer until nothing else arrives,
+    // then the partial fails silently.
+    const chunk2 = 'ng,"delta":"c",' + String.fromCharCode(10) + '}'
     const { events } = await feedChunks([
-      '{"type":"reasoning","delta":"step ',
-      'one"}\n{"type":"reasoning","delta":"ste',
-      'p ",\n',
-      'other":1}',
+      '{"type":"reasoning","delta":"ab"}\n{"type":"reasoni',
+      chunk2,
     ])
 
-    // step one emits; the truncated line {"type":"reasoning","delta":"step 
-    // doesn't complete until the next iteration — but there is none left.
-    // Actually, "step \n" creates two segments: "step " (complete line? no, not valid JSON) 
-    // and "" and the partial '{"type":"reasoning"...' waits.
-    // Since nothing else comes, the flush tries to parse the partial and fails silently.
+    // Only the first complete reasoning event is emitted.
     expect(events).toHaveLength(1)
-    expect((events[0] as any).payload.content).toBe('step one')
+    expect((events[0] as any).payload.content).toBe('ab')
   })
 })

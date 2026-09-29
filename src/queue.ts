@@ -66,7 +66,7 @@ export interface ClaimedTask {
 export async function subscribeToQueued(
   pb: PocketBase,
   onQueued: (taskId: string) => void,
-): Promise<() => void> {
+): Promise<() => Promise<void>> {
   let unsubscribe: (() => Promise<void>) | null = null
   let disposed = false
 
@@ -97,10 +97,10 @@ export async function subscribeToQueued(
     console.warn('[pb] subscribe notice:', (err as Error).message)
   }
 
-  return () => {
+  return async () => {
     disposed = true
     if (unsubscribe) {
-      unsubscribe().catch(() => {})
+      await unsubscribe().catch(() => {})
     }
   }
 }

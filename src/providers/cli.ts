@@ -298,7 +298,7 @@ export async function runProvider(
     cost: null,
   }
   const parser = createNdjsonParser(stream, onEvent)
-  const decoder = new TextDecoder({ stream: true })
+  const decoder = new TextDecoder('utf-8', { stream: true })
   let lineBuffer = ''
 
   // Drain stdout chunk-by-chunk

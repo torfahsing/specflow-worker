@@ -22,7 +22,10 @@ import type { ProviderEvent, ProviderRunResult, ProviderStream } from '../provid
 class StubPresence {
   workerId = 'w1'
   busyCalls: boolean[] = []
-  setBusy(b: boolean): void { this.busyCalls.push(b) }
+  setBusy(_b: boolean): void { this.busyCalls.push(_b) }
+  ensure(_name?: string): Promise<string> { return Promise.resolve(this.workerId) }
+  start(): void {}
+  async stop(): Promise<void> {}
 }
 
 function makeClaimed(overrides: Record<string, unknown> = {}): ClaimedTask {

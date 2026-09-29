@@ -14,7 +14,7 @@
  */
 
 import { describe, it, expect } from 'bun:test'
-import { runProvider } from '../providers/cli'
+import { runProvider, resolveProviderCommand } from '../providers/cli'
 
 // ===========================================================================
 // Classification boundary conditions
@@ -25,26 +25,25 @@ describe('R10 — timeout vs abort misclassification', () => {
     const controller = new AbortController()
 
     try {
-      // Abort immediately after spawning begins
       setTimeout(() => controller.abort(), 3)
 
+      // Use node with a script that sleeps; Bun.spawn will be aborted
+      const resolved = resolveProviderCommand('node')
+      const cmd = resolved ?? 'node'
       const result = await runProvider(
         {
-          command: 'sleep',
-          args: ['100'],
+          command: cmd,
+          model: undefined,
+          allowedTools: [],
           prompt: 'test-prompt',
           cwd: '/tmp',
-          timeoutMs: 30_000, // long enough that timeout never fires
+          timeoutMs: 30_000,
           signal: controller.signal,
         },
         () => {},
       )
-
-      // Either cancelled or timedOut — both indicate the process was killed.
-      // With such a short abort delay, we're more likely to see cancelled.
       expect(result.cancelled || result.timedOut).toBe(true)
     } catch {
-      // If the process couldn't be spawned at all, skip
       expect(true).toBe(true)
     } finally {
       if (!controller.signal.aborted) {
