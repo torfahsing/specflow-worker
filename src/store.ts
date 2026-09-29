@@ -213,9 +213,15 @@ export class MemoryWorkerStore implements WorkerStore {
     const run = this.runs.get(runId)
     if (!run) return
     if (patch.status !== undefined) run.status = patch.status
+    // Support both camelCase (RunRecord interface) and snake_case
+    // (PocketBase field naming convention) so tests and the runner
+    // can use either without a conversion layer.
     if (patch.inputTokens !== undefined) run.inputTokens = patch.inputTokens
+    if ('input_tokens' in patch && patch.input_tokens !== undefined) run.inputTokens = patch.input_tokens as number
     if (patch.outputTokens !== undefined) run.outputTokens = patch.outputTokens
+    if ('output_tokens' in patch && patch.output_tokens !== undefined) run.outputTokens = patch.output_tokens as number
     if (patch.costUsd !== undefined) run.costUsd = patch.costUsd
+    if ('cost_usd' in patch && patch.cost_usd !== undefined) run.costUsd = patch.cost_usd as number
     if (patch.error !== undefined) run.error = patch.error
   }
 
