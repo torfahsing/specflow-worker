@@ -118,3 +118,29 @@ export async function getBoundedDiff(
   return [...blocks, ...pointers].join('\n\n');
 }
 
+export async function isGitRepo(dir: string): Promise<boolean> {
+  try {
+    const res = await Bun.$`git -C ${dir} rev-parse --is-inside-work-tree`.quiet()
+    return res.exitCode === 0
+  } catch {
+    return false
+  }
+}
+
+export async function discardWorkingChanges(dir: string): Promise<void> {
+  try {
+    await Bun.$`git -C ${dir} checkout -- .`.quiet().nothrow()
+    await Bun.$`git -C ${dir} clean -fd`.quiet().nothrow()
+  } catch {
+    // ignore
+  }
+}
+
+export async function commitChanges(dir: string, message: string): Promise<void> {
+  try {
+    await Bun.$`git -C ${dir} add -A`
+    await Bun.$`git -C ${dir} commit -m ${message}`.quiet().nothrow()
+  } catch {
+    // ignore
+  }
+}

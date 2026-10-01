@@ -69,7 +69,7 @@ function makeStubProvider(
 
 function makeDeps(store: WorkerStore, overrides: { provider?: any; git?: any } = {}): RunDeps {
   const presence = new StubPresence()
-  const config = { pocketbaseUrl: 'http://localhost:8090', workerName: 't', pathOverride: undefined, envValues: {}, workerEnvPath: '' }
+  const config = { specflowUrl: 'http://localhost:3200', workerName: 't', pathOverride: undefined, envValues: {}, workerEnvPath: '' }
   const git = overrides.git ?? {
     getCurrentBranch: async () => 'main',
     branchExists: async () => true,

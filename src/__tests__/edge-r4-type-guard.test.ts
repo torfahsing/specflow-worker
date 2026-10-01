@@ -4,12 +4,10 @@
  * Extends the existing store.test.ts + events.test.ts coverage with edge-case
  * type values that could arise from:
  *   - A buggy provider emitting unexpected NDJSON types.
- *   - Manual PocketBase mutations introducing non-standard types.
  *   - Proto-typing contamination (`Object.prototype`).
  *
- * The guard exists in both RunRecorder.emit() and PocketBaseStore.emitRunEvent()
- * to prevent a silent PB `select` validation rejection from crashing the loop
- * or inserting corrupt data.
+ * The guard exists in both RunRecorder.emit() and WorkerStore.emitRunEvent()
+ * to prevent unsupported types from being emitted.
  */
 
 import { describe, it, expect, beforeEach } from 'bun:test'

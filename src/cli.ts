@@ -12,6 +12,8 @@ import { drainQueued, claimTask, subscribeToQueued, type ClaimedTask } from './q
 import { executeClaimedTask } from './runner.js'
 import { HttpWorkerStore } from './store.js'
 
+import { discoverLocalManifest } from './discovery.js'
+
 // ---------------------------------------------------------------------------
 // Constants
 // ---------------------------------------------------------------------------
@@ -69,14 +71,19 @@ export async function main(argv: string[]): Promise<void> {
   // Step 2: create Specflow HTTP/SSE client
   // -------------------------------------------------------------------------
   const client = new SpecflowClient({
-    baseUrl: config.specflowUrl || config.pocketbaseUrl || 'http://127.0.0.1:3200',
+    baseUrl: config.specflowUrl || 'http://127.0.0.1:3200',
     token: config.specflowToken,
   })
 
   // -------------------------------------------------------------------------
-  // Step 3: presence — register heartbeat and verify connection
+  // Step 3: discovery & presence — probe local capabilities, models & register
   // -------------------------------------------------------------------------
-  const presence = new Presence(client, config.workerName, ['git'], DEFAULT_WORKER_HEARTBEAT_MS)
+  const manifest = await discoverLocalManifest()
+  if (manifest.models.length > 0) {
+    console.log(`[worker] discovered ${manifest.models.length} models from local provider CLI`)
+  }
+
+  const presence = new Presence(client, config.workerName, manifest, DEFAULT_WORKER_HEARTBEAT_MS)
   const workerId = await presence.ensure()
 
   if (!workerId) {

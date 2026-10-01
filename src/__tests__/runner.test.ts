@@ -1,7 +1,7 @@
 /**
  * End-to-end tests for executeClaimedTask (src/runner.ts).
  *
- * Uses MemoryWorkerStore (no live PocketBase) and injectable
+ * Uses MemoryWorkerStore (offline in-memory store) and injectable
  * git/provider deps so the suite runs fast without spawning
  * real subprocesses for the fast assertion tests.
  *
@@ -55,8 +55,7 @@ function makeClaimedTask(overrides: Record<string, unknown> = {}): ClaimedTask {
 
 /**
  * Stub Presence that tracks setBusy calls and returns a fixed workerId.
- * Does not extend Presence (which requires PocketBase + name args);
- * relies on TypeScript structural subtyping — any object with the
+ * Relies on TypeScript structural subtyping — any object with the
  * same public surface is accepted as `Presence`.
  */
 class StubPresence {
@@ -112,7 +111,7 @@ function makeDeps(overrides: {
   const store = overrides.store ?? makeMemoryStore()
   const presence = overrides.presence ?? new StubPresence()
   const config = {
-    pocketbaseUrl: 'http://127.0.0.1:8090',
+    specflowUrl: 'http://127.0.0.1:3200',
     workerName: 'test-worker',
     pathOverride: undefined,
     envValues: {},

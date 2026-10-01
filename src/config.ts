@@ -2,8 +2,8 @@
  * Configuration resolution for the worker daemon.
  *
  * Loads ~/.specflow/worker.env (KEY=VALUE, no dotenv dependency — Bun
- * auto-loads cwd .env).  Precedence: process env wins; worker.env fills
- * gaps.  All public functions are pure or injectable so they are
+ * auto-loads cwd .env). Precedence: process env wins; worker.env fills
+ * gaps. All public functions are pure or injectable so they are
  * unit-testable without touching the real filesystem or process env.
  */
 
@@ -11,28 +11,23 @@ import { homedir, hostname } from 'node:os'
 import path from 'node:path'
 
 export interface WorkerConfig {
-  specflowUrl?: string
+  specflowUrl: string
   specflowToken?: string
   workerName: string
   pathOverride?: string
   envValues: Record<string, string>
   workerEnvPath: string
-  // Backwards-compatibility aliases
-  pocketbaseUrl: string
-  pocketbaseToken?: string
-  adminEmail?: string
-  adminPassword?: string
 }
 
-const DEFAULT_SPECFLOW_URL = 'http://127.0.0.1:8090'
+const DEFAULT_SPECFLOW_URL = 'http://127.0.0.1:3200'
 
 /**
  * Parse a raw `KEY=VALUE` text block into a flat record.
  *
- * Rules (mirrors the spec §2.3 contract):
+ * Rules:
  *  - Blank lines and `#` comments are skipped.
  *  - A leading `export ` is tolerated (shell-style).
- *  - The line is split at the **first** `=` only.
+ *  - The line is split at the first `=` only.
  *  - Both key and value are trimmed.
  *  - If the value is wrapped in a matched pair of `"` or `'`, the
  *    outer quotes are stripped (only one level).
@@ -75,9 +70,8 @@ export function parseEnv(text: string): Record<string, string> {
 /**
  * Merge process env and parsed worker.env into a WorkerConfig.
  *
- * Precedence: `env[K] !== undefined` wins (an empty-string env value
- * still wins — deterministic, no "falsy gap" ambiguity).  `pathOverride`
- * comes from `file.PATH` ONLY, never from `env.PATH`.
+ * Precedence: `env[K] !== undefined` wins. `pathOverride` comes from
+ * `file.PATH` ONLY, never from `env.PATH`.
  */
 export function resolveConfig(
   env: NodeJS.ProcessEnv,
@@ -86,16 +80,12 @@ export function resolveConfig(
   const specflowUrl =
     env.SPECFLOW_URL ??
     file.SPECFLOW_URL ??
-    env.POCKETBASE_URL ??
-    file.POCKETBASE_URL ??
     DEFAULT_SPECFLOW_URL
+
   const specflowToken =
     env.SPECFLOW_TOKEN ??
-    file.SPECFLOW_TOKEN ??
-    env.POCKETBASE_TOKEN ??
-    file.POCKETBASE_TOKEN
-  const adminEmail = env.POCKETBASE_ADMIN_EMAIL ?? file.POCKETBASE_ADMIN_EMAIL
-  const adminPassword = env.POCKETBASE_ADMIN_PASSWORD ?? file.POCKETBASE_ADMIN_PASSWORD
+    file.SPECFLOW_TOKEN
+
   const workerName = env.WORKER_NAME ?? file.WORKER_NAME ?? hostname()
   const pathOverride = file.PATH
 
@@ -109,10 +99,6 @@ export function resolveConfig(
   return {
     specflowUrl,
     specflowToken,
-    pocketbaseUrl: specflowUrl,
-    pocketbaseToken: specflowToken,
-    adminEmail,
-    adminPassword,
     workerName,
     pathOverride,
     envValues,
@@ -126,7 +112,7 @@ export function resolveConfig(
  * The worker.env path defaults to `~/.specflow/worker.env` (or
  * `$SPECFLOW_DIR/.specflow/worker.env` when `SPECFLOW_DIR` is set).
  * The file is read via `Bun.file`; if it does not exist, an empty
- * record is used (no error).  The function never writes the file.
+ * record is used (no error). The function never writes the file.
  */
 export async function loadConfig(overrides?: {
   env?: NodeJS.ProcessEnv
