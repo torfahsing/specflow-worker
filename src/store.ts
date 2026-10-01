@@ -16,7 +16,9 @@
  * implemented twice (A14).
  */
 
-import type PocketBase from 'pocketbase'
+import type { SpecflowClient } from './client.js'
+
+type PocketBase = any
 
 // ---------------------------------------------------------------------------
 // Types (single source of truth for run_event.type select values)
@@ -238,3 +240,48 @@ export class MemoryWorkerStore implements WorkerStore {
     this.taskPatches.push({ taskId, patch })
   }
 }
+
+export class HttpWorkerStore implements WorkerStore {
+  private activeTaskId = '';
+
+  constructor(private client: SpecflowClient) {}
+
+  setActiveTask(taskId: string): void {
+    this.activeTaskId = taskId;
+  }
+
+  async createRun(input: { taskId: string; featureId: string }): Promise<string> {
+    this.activeTaskId = input.taskId;
+    return `run_${input.taskId}`;
+  }
+
+  async updateRun(runId: string, patch: Partial<RunRecord>): Promise<void> {
+    const status = patch.status === 'completed' ? 'completed' : 'failed';
+    await this.client.finishTask(this.activeTaskId, {
+      run_id: runId,
+      status,
+      error: patch.error,
+      input_tokens: patch.inputTokens,
+      output_tokens: patch.outputTokens,
+      cost_usd: patch.costUsd,
+    }).catch(() => {});
+  }
+
+  async emitRunEvent(
+    runId: string,
+    sequence: number,
+    type: RunEventType,
+    payload: unknown,
+  ): Promise<void> {
+    if (!RUN_EVENT_TYPES.has(type)) {
+      console.warn(`[worker] skipping unsupported run_event type "${type}"`);
+      return;
+    }
+    await this.client.sendEvents(this.activeTaskId, runId, [{ sequence, type, payload }]).catch(() => {});
+  }
+
+  async updateTask(taskId: string, patch: Record<string, unknown>): Promise<void> {
+    // Task state changes are synced through claimTask and finishTask on server
+  }
+}
+

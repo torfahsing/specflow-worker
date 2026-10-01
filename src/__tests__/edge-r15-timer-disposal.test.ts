@@ -7,9 +7,9 @@
  */
 
 import { describe, it, expect } from 'bun:test'
-import type PocketBase from 'pocketbase'
 import { Presence } from '../presence'
-import { createClient, startAuthWatchdog } from '../pb/client'
+
+type PocketBase = any
 
 // ---------------------------------------------------------------------------
 // Helpers
@@ -153,35 +153,5 @@ describe('R15 — Presence timer disposal', () => {
       global.setInterval = origSetInterval
       await presence.stop()
     }
-  })
-})
-
-// ===========================================================================
-// R15 — Auth watchdog timer disposal
-// ===========================================================================
-
-describe('R15 — Auth watchdog timer disposal', () => {
-  it('disposer stops further ticks immediately', async () => {
-    const pb = createClient('http://127.0.0.1:1')
-    const opts = { email: 'a@b.c', password: 'pw' }
-    const stop = startAuthWatchdog(pb, opts, 10)
-
-    await sleep(25)
-    stop()
-
-    // Wait longer than another tick interval — nothing should happen after stop.
-    await sleep(25)
-    expect(true).toBe(true)
-  })
-
-  it('disposer clears the interval even on multiple calls', async () => {
-    const pb = createClient('http://127.0.0.1:1')
-    const opts = { email: 'a@b.c', password: 'pw' }
-    const stop = startAuthWatchdog(pb, opts, 10)
-
-    await sleep(20)
-    stop()
-    stop() // second call — should not throw
-    expect(true).toBe(true)
   })
 })

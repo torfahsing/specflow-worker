@@ -46,13 +46,17 @@ export function buildProviderCmd(input: {
   command: string
   model?: string
   allowedTools?: string[]
+  outputSchemaPath?: string
+  args?: string[]
 }): string[] {
   const tools = input.allowedTools ?? []
   return [
     input.command,
+    ...(input.args ?? []),
     ...(input.model ? ['--model', input.model] : []),
     '--allowedTools',
     ...(tools.length > 0 ? tools : ['none']),
+    ...(input.outputSchemaPath ? ['--output-schema', input.outputSchemaPath] : []),
     '-j',
     '--no-session',
   ]
@@ -173,6 +177,8 @@ export interface ProviderRunInput {
   signal: AbortSignal
   pathOverride?: string
   extraEnv?: Record<string, string>
+  outputSchemaPath?: string
+  args?: string[]
 }
 
 export interface ProviderRunResult {
@@ -251,6 +257,8 @@ export async function runProvider(
     command: resolved,
     model,
     allowedTools,
+    outputSchemaPath: input.outputSchemaPath,
+    args: input.args,
   })
 
   // --- Spawn ---
@@ -298,7 +306,7 @@ export async function runProvider(
     cost: null,
   }
   const parser = createNdjsonParser(stream, onEvent)
-  const decoder = new TextDecoder('utf-8', { stream: true })
+  const decoder = new TextDecoder('utf-8')
   let lineBuffer = ''
 
   // Drain stdout chunk-by-chunk

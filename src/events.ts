@@ -42,8 +42,14 @@ export class RunRecorder {
    */
   static async start(
     store: WorkerStore,
-    input: { taskId: string; featureId: string },
+    input: { taskId: string; featureId: string; runId?: string },
   ): Promise<RunRecorder> {
+    if (input.runId) {
+      if ((store as any).setActiveTask) {
+        (store as any).setActiveTask(input.taskId)
+      }
+      return new RunRecorder(input.runId, store)
+    }
     try {
       const runId = await store.createRun(input)
       return new RunRecorder(runId, store)

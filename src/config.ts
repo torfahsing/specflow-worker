@@ -11,17 +11,20 @@ import { homedir, hostname } from 'node:os'
 import path from 'node:path'
 
 export interface WorkerConfig {
-  pocketbaseUrl: string
-  pocketbaseToken?: string
-  adminEmail?: string
-  adminPassword?: string
+  specflowUrl?: string
+  specflowToken?: string
   workerName: string
   pathOverride?: string
   envValues: Record<string, string>
   workerEnvPath: string
+  // Backwards-compatibility aliases
+  pocketbaseUrl: string
+  pocketbaseToken?: string
+  adminEmail?: string
+  adminPassword?: string
 }
 
-const DEFAULT_PB_URL = 'http://127.0.0.1:8090'
+const DEFAULT_SPECFLOW_URL = 'http://127.0.0.1:8090'
 
 /**
  * Parse a raw `KEY=VALUE` text block into a flat record.
@@ -80,8 +83,17 @@ export function resolveConfig(
   env: NodeJS.ProcessEnv,
   file: Record<string, string>,
 ): WorkerConfig {
-  const pocketbaseUrl = env.POCKETBASE_URL ?? file.POCKETBASE_URL ?? DEFAULT_PB_URL
-  const pocketbaseToken = env.POCKETBASE_TOKEN ?? file.POCKETBASE_TOKEN
+  const specflowUrl =
+    env.SPECFLOW_URL ??
+    file.SPECFLOW_URL ??
+    env.POCKETBASE_URL ??
+    file.POCKETBASE_URL ??
+    DEFAULT_SPECFLOW_URL
+  const specflowToken =
+    env.SPECFLOW_TOKEN ??
+    file.SPECFLOW_TOKEN ??
+    env.POCKETBASE_TOKEN ??
+    file.POCKETBASE_TOKEN
   const adminEmail = env.POCKETBASE_ADMIN_EMAIL ?? file.POCKETBASE_ADMIN_EMAIL
   const adminPassword = env.POCKETBASE_ADMIN_PASSWORD ?? file.POCKETBASE_ADMIN_PASSWORD
   const workerName = env.WORKER_NAME ?? file.WORKER_NAME ?? hostname()
@@ -95,8 +107,10 @@ export function resolveConfig(
   }
 
   return {
-    pocketbaseUrl,
-    pocketbaseToken,
+    specflowUrl,
+    specflowToken,
+    pocketbaseUrl: specflowUrl,
+    pocketbaseToken: specflowToken,
     adminEmail,
     adminPassword,
     workerName,

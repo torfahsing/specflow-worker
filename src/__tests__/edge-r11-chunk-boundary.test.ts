@@ -38,7 +38,7 @@ async function feedChunks(
   const events: unknown[] = []
   const parser = createNdjsonParser(stream, (e) => events.push(e))
 
-  const decoder = new TextDecoder('utf-8', { stream: true })
+  const decoder = new TextDecoder('utf-8')
   let lineBuffer = ''
 
   for (const raw of rawChunks) {
@@ -125,8 +125,8 @@ describe('R11 — NDJSON chunk boundary', () => {
     // Two complete lines and a partial third
     const { events, stream } = await feedChunks([
       '{"type":"text","delta":"first"}\n',
-      '{"type":"text","delta":"sec",',
-      'ond","delta":""}',
+      '{"type":"text","delta":"sec',
+      'ond"}',
     ])
 
     // The last chunk completes the second line.
@@ -146,7 +146,7 @@ describe('R11 — NDJSON chunk boundary', () => {
   it('binary data in chunks does not crash the drain', async () => {
     // Non-UTF8 bytes fed through TextDecoder
     const { events } = await feedChunks([
-      Buffer.from([0x00, 0xff, 0xfe]).toString('binary'),
+      Buffer.from([0x00, 0xff, 0xfe, 0x0a]).toString('binary'),
       '{"type":"text","delta":"after binary"}\n',
     ])
 

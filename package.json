@@ -9,9 +9,6 @@
     "test": "bun test",
     "typecheck": "tsc --noEmit"
   },
-  "dependencies": {
-    "pocketbase": "^0.28.1"
-  },
   "devDependencies": {
     "@types/bun": "latest"
   },
