@@ -18,7 +18,7 @@ export async function subscribeToQueued(
   onQueued: (taskId: string) => void,
 ): Promise<() => Promise<void>> {
   const unsub = client.connectStream(
-    (data: { task_id: string }) => onQueued(data.task_id),
+    (data: any) => onQueued(data.task_id || data.taskId),
     (err: Error) => console.warn('[worker] sse notice:', err.message),
   )
   return async () => unsub()

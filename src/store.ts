@@ -79,9 +79,9 @@ export class HttpWorkerStore implements WorkerStore {
       run_id: runId,
       status,
       error: patch.error,
-      input_tokens: patch.inputTokens,
-      output_tokens: patch.outputTokens,
-      cost_usd: patch.costUsd,
+      input_tokens: patch.inputTokens ?? (patch as any).input_tokens,
+      output_tokens: patch.outputTokens ?? (patch as any).output_tokens,
+      cost_usd: patch.costUsd ?? (patch as any).cost_usd,
     }).catch((err) => {
       console.warn('[store] finishTask notice:', err?.message || String(err))
     })
