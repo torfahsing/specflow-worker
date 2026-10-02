@@ -43,6 +43,29 @@ export async function checkoutBranch(dir: string, branch: string): Promise<void>
   }
 }
 
+export async function discardWorkingChanges(dir: string): Promise<void> {
+  try {
+    await Bun.$`git -C ${dir} checkout -- .`.text()
+    await Bun.$`git -C ${dir} clean -fd`.text()
+  } catch (err) {
+    console.error(`[git] failed to discard working changes: ${(err as Error).message}`)
+  }
+}
+
+export async function commitChanges(dir: string, message: string): Promise<boolean> {
+  try {
+    const status = (await Bun.$`git -C ${dir} status --porcelain`.text()).trim()
+    if (!status) return false
+    await Bun.$`git -C ${dir} add -A`.text()
+    await Bun.$`git -C ${dir} commit -m ${message}`.text()
+    console.log(`[git] committed changes in '${dir}': ${message}`)
+    return true
+  } catch (err) {
+    console.warn(`[git] commit failed: ${(err as Error).message}`)
+    return false
+  }
+}
+
 /**
  * Assemble a bounded git diff representation capped at maxDiffChars (default 100,000).
  * Prevents context ballooning by appending a manifest and file pointers when truncated.
@@ -124,23 +147,5 @@ export async function isGitRepo(dir: string): Promise<boolean> {
     return res.exitCode === 0
   } catch {
     return false
-  }
-}
-
-export async function discardWorkingChanges(dir: string): Promise<void> {
-  try {
-    await Bun.$`git -C ${dir} checkout -- .`.quiet().nothrow()
-    await Bun.$`git -C ${dir} clean -fd`.quiet().nothrow()
-  } catch {
-    // ignore
-  }
-}
-
-export async function commitChanges(dir: string, message: string): Promise<void> {
-  try {
-    await Bun.$`git -C ${dir} add -A`
-    await Bun.$`git -C ${dir} commit -m ${message}`.quiet().nothrow()
-  } catch {
-    // ignore
   }
 }

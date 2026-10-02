@@ -18,7 +18,7 @@ import type { WorkerConfig } from './config.js'
 import type { ClaimedTask } from './queue.js'
 import type { ProviderRunResult, ProviderStream, ProviderEvent } from './providers/cli.js'
 import { RunRecorder } from './events.js'
-import type { getCurrentBranch, branchExists, createBranch, checkoutBranch, getBoundedDiff } from './git/utils.js'
+import type { getCurrentBranch, branchExists, createBranch, checkoutBranch, getBoundedDiff, discardWorkingChanges, commitChanges } from './git/utils.js'
 import { parseStructuredOutput } from './providers/structured-parser.js'
 
 // ---------------------------------------------------------------------------
@@ -205,17 +205,29 @@ export async function executeClaimedTask(
       if (result.cancelled) break  // aborted — don't try next model
       if (i < modelsToTry.length - 1) {
         console.log(`[runner] model "${model}" failed, trying next model...`)
+        if (cwd && gitModule.discardWorkingChanges) {
+          console.log(`[runner] discarding dirty changes before retry with next model`)
+          await gitModule.discardWorkingChanges(cwd)
+        }
       }
     } catch (err) {
       lastError = (err as Error).message
       if (i < modelsToTry.length - 1) {
         console.log(`[runner] model "${model}" threw error: ${lastError}, trying next model...`)
+        if (cwd && gitModule.discardWorkingChanges) {
+          console.log(`[runner] discarding dirty changes before retry with next model`)
+          await gitModule.discardWorkingChanges(cwd)
+        }
       }
     }
   }
 
   if (!result) {
     if (stagedSchemaPath) await rm(stagedSchemaPath, { force: true }).catch(() => {})
+    if (cwd && gitModule.discardWorkingChanges) {
+      console.log(`[runner] discarding dirty changes after failed task "${taskId}"`)
+      await gitModule.discardWorkingChanges(cwd)
+    }
     const error = lastError ?? 'All models failed'
     await recorder.finalize({ status: 'failed', error })
     await store.updateTask(taskId, { status: 'failed', error })
@@ -228,6 +240,10 @@ export async function executeClaimedTask(
   if (result.cancelled) {
     if (stagedSchemaPath) {
       await rm(stagedSchemaPath, { force: true }).catch(() => {})
+    }
+    if (cwd && gitModule.discardWorkingChanges) {
+      console.log(`[runner] discarding dirty changes after cancelled task "${taskId}"`)
+      await gitModule.discardWorkingChanges(cwd)
     }
     await recorder.emitTerminalError({
       message: 'Aborted',
@@ -304,6 +320,10 @@ export async function executeClaimedTask(
 
   // Step 8: terminal error event for non-cancellation failures
   if (result.error) {
+    if (cwd && gitModule.discardWorkingChanges) {
+      console.log(`[runner] discarding dirty changes after failed task "${taskId}"`)
+      await gitModule.discardWorkingChanges(cwd)
+    }
     await recorder.emitTerminalError({
       message: result.error,
       exit_code: result.exitCode,
@@ -317,6 +337,17 @@ export async function executeClaimedTask(
   }
 
   // Clean success path
+  if (cwd && gitModule.commitChanges) {
+    const displayTaskId = (record.task_id || taskId) as string
+    const title = (record.title || displayTaskId) as string
+    try {
+      await gitModule.commitChanges(cwd, `task(${displayTaskId}): ${title}`)
+      console.log(`[runner] committed changes for task "${displayTaskId}"`)
+    } catch (commitErr: any) {
+      console.warn(`[runner] commit for task "${displayTaskId}" failed:`, commitErr?.message)
+    }
+  }
+
   const tokens = result.stream.tokens
   const costUsd = result.stream.cost
 
