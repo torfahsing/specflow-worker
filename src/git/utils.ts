@@ -149,3 +149,128 @@ export async function isGitRepo(dir: string): Promise<boolean> {
     return false
   }
 }
+
+export async function initRepo(dir: string): Promise<void> {
+  try {
+    await Bun.$`git -C ${dir} init`.quiet()
+  } catch (err) {
+    throw new Error(`Failed to init repo at '${dir}': ${(err as Error).message}`)
+  }
+}
+
+export async function hasUncommittedChanges(dir: string): Promise<boolean> {
+  try {
+    const status = (await Bun.$`git -C ${dir} status --porcelain`.text()).trim()
+    return status.length > 0
+  } catch {
+    return false
+  }
+}
+
+export async function rebaseBranch(dir: string, branch: string, onto = 'main'): Promise<void> {
+  try {
+    await Bun.$`git -C ${dir} rebase ${onto} ${branch}`.quiet()
+  } catch (err) {
+    await Bun.$`git -C ${dir} rebase --abort`.quiet().catch(() => {})
+    throw new Error(`Failed to rebase '${branch}' onto '${onto}': ${(err as Error).message}`)
+  }
+}
+
+export async function getChangedFiles(dir: string, base?: string): Promise<string[]> {
+  try {
+    const out = base
+      ? await Bun.$`git -C ${dir} diff --name-only ${base}...HEAD`.text()
+      : await Bun.$`git -C ${dir} diff --name-only HEAD`.text()
+    return out.trim().split('\n').filter(Boolean)
+  } catch {
+    try {
+      const out = await Bun.$`git -C ${dir} diff --name-only HEAD`.text()
+      return out.trim().split('\n').filter(Boolean)
+    } catch {
+      return []
+    }
+  }
+}
+
+export async function hasRemote(dir: string): Promise<boolean> {
+  try {
+    await Bun.$`git -C ${dir} remote get-url origin`.quiet()
+    return true
+  } catch {
+    return false
+  }
+}
+
+export async function pushBranch(dir: string, branch: string): Promise<void> {
+  try {
+    await Bun.$`git -C ${dir} push -u origin ${branch}`.quiet()
+  } catch (err) {
+    throw new Error(`Failed to push branch '${branch}': ${(err as Error).message}`)
+  }
+}
+
+export async function createPullRequest(
+  dir: string,
+  title: string,
+  body: string,
+  branch: string,
+): Promise<string | null> {
+  try {
+    const out = (
+      await Bun.$`gh pr create --title ${title} --body ${body} --head ${branch}`.cwd(dir).text()
+    ).trim()
+    return out
+  } catch (err) {
+    console.warn(`[git] Failed to create PR: ${(err as Error).message}`)
+    return null
+  }
+}
+
+const EXT_LANGUAGE: Record<string, string> = {
+  '.ts': 'typescript', '.tsx': 'typescript', '.js': 'javascript', '.jsx': 'javascript',
+  '.json': 'json', '.md': 'markdown', '.html': 'html', '.css': 'css', '.scss': 'scss',
+  '.yaml': 'yaml', '.yml': 'yaml', '.py': 'python', '.go': 'go', '.rs': 'rust',
+  '.sh': 'shell', '.sql': 'sql', '.xml': 'xml', '.java': 'java', '.rb': 'ruby',
+}
+
+export interface FileDiff {
+  path: string
+  original: string
+  modified: string
+  language: string
+}
+
+export async function getFileDiff(dir: string, filepath: string, branch: string): Promise<FileDiff> {
+  const ext = filepath.substring(filepath.lastIndexOf('.'))
+  const language = EXT_LANGUAGE[ext.toLowerCase()] || 'plaintext'
+
+  const branchTip = branch
+  let baseRef = `${branchTip}~1`
+
+  try {
+    const out = await Bun.$`git -C ${dir} log --oneline main..${branch}`.text()
+    const uniqueCommits = out.trim().split('\n').filter(Boolean)
+    if (uniqueCommits.length > 0) {
+      const oldest = uniqueCommits[uniqueCommits.length - 1].split(' ')[0]
+      baseRef = `${oldest}~1`
+    }
+  } catch {
+    // use branch~1
+  }
+
+  let original = ''
+  try {
+    original = await Bun.$`git -C ${dir} show ${baseRef}:${filepath}`.text()
+  } catch {
+    // new file
+  }
+
+  let modified = ''
+  try {
+    modified = await Bun.$`git -C ${dir} show ${branchTip}:${filepath}`.text()
+  } catch {
+    // deleted file
+  }
+
+  return { path: filepath, original, modified, language }
+}

@@ -277,6 +277,26 @@ export async function runProvider(
     timeout: timeoutMs,
   })
 
+  let killEscalationTimer: any = null
+  const onAbort = () => {
+    try {
+      console.log(`[cli] abort signal triggered — terminating child process (SIGTERM)`)
+      proc.kill('SIGTERM')
+      killEscalationTimer = setTimeout(() => {
+        try {
+          console.log(`[cli] child process still alive after 1.5s — escalating to SIGKILL`)
+          proc.kill('SIGKILL')
+        } catch {}
+      }, 1500)
+      killEscalationTimer.unref?.()
+    } catch {}
+  }
+  if (signal.aborted) {
+    onAbort()
+  } else {
+    signal.addEventListener('abort', onAbort, { once: true })
+  }
+
   // --- Write prompt to stdin (EPIPE-safe) ---
   try {
     proc.stdin.write(prompt)
@@ -348,8 +368,10 @@ export async function runProvider(
     parser(lineBuffer)
   }
 
-  // --- Clear timeout timer ---
+  // --- Clear timeout timer and abort handlers ---
   clearTimeout(timeoutTimer)
+  signal.removeEventListener('abort', onAbort)
+  if (killEscalationTimer) clearTimeout(killEscalationTimer)
 
   // --- Diagnostics: exit line ---
   const resultChars = stream.resultText.length

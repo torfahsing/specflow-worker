@@ -112,7 +112,9 @@ export async function executeClaimedTask(
   }
 
   if (!cwd) {
-    const error = `Feature "${featureId}" has no "project_dir".`
+    const error = featureId
+      ? `Feature "${featureId}" has no "project_dir".`
+      : `Task "${taskId}" has no "project_dir".`
     await recorder.finalize({ status: 'failed', error })
     await store.updateTask(taskId, { status: 'failed', error })
     presence.setBusy(false)
@@ -336,8 +338,9 @@ export async function executeClaimedTask(
     return { status: 'failed', runId: recorder.runId, error: result.error }
   }
 
-  // Clean success path
-  if (cwd && gitModule.commitChanges) {
+  // Clean success path - only commit if task is an implementation/feature task with a branch or write tools
+  const canModifyFiles = allowedTools.some(t => ['file_write', 'file_edit', 'shell'].includes(t))
+  if (cwd && branch && canModifyFiles && gitModule.commitChanges) {
     const displayTaskId = (record.task_id || taskId) as string
     const title = (record.title || displayTaskId) as string
     try {

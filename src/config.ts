@@ -17,6 +17,7 @@ export interface WorkerConfig {
   pathOverride?: string
   envValues: Record<string, string>
   workerEnvPath: string
+  concurrency?: number
 }
 
 const DEFAULT_SPECFLOW_URL = 'http://127.0.0.1:3200'
@@ -96,6 +97,10 @@ export function resolveConfig(
     envValues.PATH = pathOverride
   }
 
+  const rawConcurrency = env.SPECFLOW_WORKER_CONCURRENCY ?? file.SPECFLOW_WORKER_CONCURRENCY
+  const parsedConcurrency = rawConcurrency ? parseInt(rawConcurrency, 10) : undefined
+  const concurrency = parsedConcurrency && !isNaN(parsedConcurrency) && parsedConcurrency > 0 ? parsedConcurrency : 1
+
   return {
     specflowUrl,
     specflowToken,
@@ -103,6 +108,7 @@ export function resolveConfig(
     pathOverride,
     envValues,
     workerEnvPath: '', // filled by loadConfig
+    concurrency,
   }
 }
 

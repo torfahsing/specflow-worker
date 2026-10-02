@@ -11,7 +11,8 @@ import { Presence } from './presence.js'
 import { drainQueued, claimTask, subscribeToQueued, type ClaimedTask } from './queue.js'
 import { executeClaimedTask } from './runner.js'
 import { HttpWorkerStore } from './store.js'
-import { discoverLocalManifest } from './discovery.js'
+import { discoverLocalManifest, probeCapabilities, probeModels, probeQuota } from './discovery.js'
+import * as git from './git/utils.js'
 
 // ---------------------------------------------------------------------------
 // Constants
@@ -247,7 +248,14 @@ async function runDaemon(): Promise<void> {
   console.log(`[worker] registered: worker_id=${workerId}`)
 
   const pending = new Set<string>()
-  let activePromise: Promise<unknown> | null = null
+  interface ActiveTaskInfo {
+    taskId: string
+    featureId: string
+    controller: AbortController
+    promise: Promise<unknown>
+  }
+  const activeTasks = new Map<string, ActiveTaskInfo>()
+  const concurrency = config.concurrency ?? 1
   let shuttingDown = false
   let unsub: (() => Promise<void>) | null = null
   let pollInterval: ReturnType<typeof setInterval> | null = null
@@ -263,35 +271,198 @@ async function runDaemon(): Promise<void> {
   }
 
   async function pump(): Promise<void> {
-    if (activePromise !== null) return
+    if (activeTasks.size >= concurrency || shuttingDown) return
 
-    while (pending.size > 0 && !shuttingDown) {
+    while (activeTasks.size < concurrency && pending.size > 0 && !shuttingDown) {
       const taskId = pending.values().next().value!
       pending.delete(taskId)
 
       const claimed = await claimTask(client, taskId, workerId)
       if (!claimed) continue
 
-      activePromise = executeClaimedTask(
+      const taskController = new AbortController()
+      const onShutdown = () => taskController.abort()
+      shutdownController.signal.addEventListener('abort', onShutdown, { once: true })
+
+      const promise = executeClaimedTask(
         claimed,
         {
           store,
           presence,
           config,
         },
-        shutdownController.signal,
+        taskController.signal,
       )
         .catch((err) => {
           console.error(`[worker] task execution error:`, err?.message || String(err))
         })
         .finally(() => {
-          activePromise = null
+          shutdownController.signal.removeEventListener('abort', onShutdown)
+          activeTasks.delete(claimed.id)
           if (!shuttingDown) {
             pump().catch(() => {})
           }
         })
 
+      activeTasks.set(claimed.id, {
+        taskId: claimed.id,
+        featureId: claimed.featureId,
+        controller: taskController,
+        promise,
+      })
+    }
+  }
+
+  function handleControl(ctrl: { action: string; task_id?: string; taskId?: string; feature?: string; queryId?: string; command?: string; [key: string]: any }): void {
+    if (ctrl.action.startsWith('query:') || ctrl.action.startsWith('query_')) {
+      const queryId = ctrl.queryId
+      const command = ctrl.command || config.providerCommand || 'openrouter-agent'
+      if (!queryId) return
+
+      const action = ctrl.action.replace('_', ':')
+      console.log(`[worker] handling on-demand query "${action}" (id=${queryId}, command=${command})`)
+
+      Promise.resolve().then(async () => {
+        try {
+          if (action === 'query:models') {
+            const models = await probeModels(command)
+            await client.sendQueryResponse(queryId, models)
+          } else if (action === 'query:quota') {
+            const quota = await probeQuota(command)
+            await client.sendQueryResponse(queryId, quota)
+          } else if (action === 'query:capabilities') {
+            const caps = await probeCapabilities(command)
+            await client.sendQueryResponse(queryId, caps)
+          }
+        } catch (err: any) {
+          console.warn(`[worker] query "${action}" error:`, err?.message || String(err))
+          await client.sendQueryResponse(queryId, null, err?.message || String(err)).catch(() => {})
+        }
+      })
       return
+    }
+
+    if (ctrl.action.startsWith('git:')) {
+      const queryId = ctrl.queryId
+      if (!queryId) return
+      const dir = ctrl.dir as string
+
+      Promise.resolve().then(async () => {
+        try {
+          if (ctrl.action === 'git:init_repo') {
+            await git.initRepo(dir)
+            await client.sendQueryResponse(queryId, { ok: true })
+          } else if (ctrl.action === 'git:validate_branch') {
+            const isRepo = await git.isGitRepo(dir)
+            if (!isRepo) {
+              await client.sendQueryResponse(queryId, { error: null })
+            } else {
+              const exists = await git.branchExists(dir, ctrl.branch)
+              if (!exists) {
+                await client.sendQueryResponse(queryId, { error: null })
+              } else {
+                const dirty = await git.hasUncommittedChanges(dir)
+                if (dirty) {
+                  if (ctrl.isFirstPhase) {
+                    await client.sendQueryResponse(queryId, {
+                      error: 'Working directory has uncommitted changes. Commit or stash before running a phase.',
+                    })
+                  } else {
+                    console.log(`[worker] uncommitted changes detected in working directory — skipping rebase onto main`)
+                    await client.sendQueryResponse(queryId, { error: null })
+                  }
+                } else {
+                  try {
+                    console.log(`[worker] rebasing '${ctrl.branch}' onto main before phase`)
+                    await git.rebaseBranch(dir, ctrl.branch)
+                    await client.sendQueryResponse(queryId, { error: null })
+                  } catch (err: any) {
+                    await client.sendQueryResponse(queryId, {
+                      error: `Branch '${ctrl.branch}' rebase onto main failed: ${err.message}`,
+                    })
+                  }
+                }
+              }
+            }
+          } else if (ctrl.action === 'git:commit_phase') {
+            const isRepo = await git.isGitRepo(dir)
+            if (!isRepo) {
+              await client.sendQueryResponse(queryId, { committed: false })
+            } else {
+              const committed = await git.commitChanges(dir, ctrl.message)
+              await client.sendQueryResponse(queryId, { committed })
+            }
+          } else if (ctrl.action === 'git:get_changed_files') {
+            const isRepo = await git.isGitRepo(dir)
+            if (!isRepo) {
+              await client.sendQueryResponse(queryId, { files: [] })
+            } else {
+              const files = await git.getChangedFiles(dir, ctrl.base)
+              await client.sendQueryResponse(queryId, { files })
+            }
+          } else if (ctrl.action === 'git:get_bounded_diff') {
+            const isRepo = await git.isGitRepo(dir)
+            if (!isRepo) {
+              await client.sendQueryResponse(queryId, { diff: null })
+            } else {
+              const diff = await git.getBoundedDiff(dir, ctrl.branch, ctrl.maxDiffChars)
+              await client.sendQueryResponse(queryId, { diff })
+            }
+          } else if (ctrl.action === 'git:get_file_diff') {
+            const isRepo = await git.isGitRepo(dir)
+            if (!isRepo) {
+              await client.sendQueryResponse(queryId, { error: 'Not a git repo' })
+            } else {
+              const fileDiff = await git.getFileDiff(dir, ctrl.filepath, ctrl.branch)
+              await client.sendQueryResponse(queryId, { diff: fileDiff })
+            }
+          } else if (ctrl.action === 'git:finalize') {
+            const isRepo = await git.isGitRepo(dir)
+            if (!isRepo) {
+              await client.sendQueryResponse(queryId, { prUrl: null })
+            } else {
+              let prUrl: string | null = null
+              if (await git.hasRemote(dir)) {
+                console.log(`[worker] pushing branch "${ctrl.branch}"`)
+                await git.pushBranch(dir, ctrl.branch)
+                console.log(`[worker] creating PR for "${ctrl.featureName}"`)
+                prUrl = await git.createPullRequest(dir, ctrl.featureName, ctrl.description, ctrl.branch)
+              }
+              await client.sendQueryResponse(queryId, { prUrl })
+            }
+          } else if (ctrl.action === 'git:is_repo') {
+            const isRepo = await git.isGitRepo(dir)
+            await client.sendQueryResponse(queryId, { isRepo })
+          } else {
+            await client.sendQueryResponse(queryId, null, `Unknown git action: ${ctrl.action}`)
+          }
+        } catch (err: any) {
+          console.warn(`[worker] git action "${ctrl.action}" failed:`, err?.message || String(err))
+          await client.sendQueryResponse(queryId, null, err?.message || String(err)).catch(() => {})
+        }
+      })
+      return
+    }
+
+    if (ctrl.action === 'stop' || ctrl.action === 'cancel') {
+      const targetTaskId = ctrl.taskId || ctrl.task_id
+      const targetFeature = ctrl.feature
+      console.log(`[worker] received control stop: taskId=${targetTaskId || '*'} feature=${targetFeature || '*'}`)
+
+      let stoppedCount = 0
+      for (const [id, taskInfo] of activeTasks.entries()) {
+        const matchesTask = targetTaskId ? (id === targetTaskId || taskInfo.taskId === targetTaskId) : true
+        const matchesFeature = targetFeature ? (taskInfo.featureId === targetFeature) : true
+
+        if (matchesTask && matchesFeature) {
+          console.log(`[worker] aborting active task "${id}" (feature: "${taskInfo.featureId}")`)
+          taskInfo.controller.abort()
+          stoppedCount++
+        }
+      }
+      if (stoppedCount === 0) {
+        console.log(`[worker] stop signal received but no active tasks matched`)
+      }
     }
   }
 
@@ -303,11 +474,15 @@ async function runDaemon(): Promise<void> {
   pump().catch(() => {})
 
   try {
-    unsub = await subscribeToQueued(client, (taskId) => {
-      if (shuttingDown) return
-      pending.add(taskId)
-      pump().catch(() => {})
-    })
+    unsub = await subscribeToQueued(
+      client,
+      (taskId) => {
+        if (shuttingDown) return
+        pending.add(taskId)
+        pump().catch(() => {})
+      },
+      handleControl,
+    )
     console.log(`[worker] SSE subscription established`)
   } catch (err: any) {
     console.warn(`[worker] SSE subscribe failed (${err?.message || String(err)}), falling back to polling`)
@@ -341,10 +516,11 @@ async function runDaemon(): Promise<void> {
 
     shutdownController.abort()
 
-    if (activePromise !== null) {
-      console.log('[worker] waiting for active task to finalize...')
+    if (activeTasks.size > 0) {
+      console.log(`[worker] waiting for ${activeTasks.size} active task(s) to finalize...`)
+      const promises = Array.from(activeTasks.values()).map((t) => t.promise)
       const cap = new Promise((resolve) => setTimeout(resolve, SHUTDOWN_FINALIZE_CAP_MS))
-      await Promise.race([activePromise, cap]).catch(() => {})
+      await Promise.race([Promise.all(promises), cap]).catch(() => {})
     }
 
     await presence.stop().catch(() => {})

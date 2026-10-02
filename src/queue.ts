@@ -16,10 +16,12 @@ export interface ClaimedTask {
 export async function subscribeToQueued(
   client: SpecflowClient,
   onQueued: (taskId: string) => void,
+  onControl?: (control: { action: string; task_id?: string; taskId?: string; feature?: string }) => void,
 ): Promise<() => Promise<void>> {
   const unsub = client.connectStream(
     (data: any) => onQueued(data.task_id || data.taskId),
     (err: Error) => console.warn('[worker] sse notice:', err.message),
+    onControl,
   )
   return async () => unsub()
 }
