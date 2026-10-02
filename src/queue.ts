@@ -13,47 +13,14 @@ export interface ClaimedTask {
   runId?: string
 }
 
-export async function subscribeToQueued(
+export async function subscribeToControl(
   client: SpecflowClient,
-  onQueued: (taskId: string) => void,
-  onControl?: (control: { action: string; task_id?: string; taskId?: string; feature?: string }) => void,
+  onControl: (control: { action: string; [key: string]: any }) => void,
 ): Promise<() => Promise<void>> {
   const unsub = client.connectStream(
-    (data: any) => onQueued(data.task_id || data.taskId),
-    (err: Error) => console.warn('[worker] sse notice:', err.message),
     onControl,
+    (err: Error) => console.warn('[worker] sse notice:', err.message),
   )
   return async () => unsub()
 }
 
-export async function drainQueued(
-  client: SpecflowClient,
-): Promise<string[]> {
-  try {
-    const tasks = await client.getPendingTasks()
-    return tasks.map((t: any) => t.id)
-  } catch (err: any) {
-    console.warn('[worker] drain notice:', err.message)
-    return []
-  }
-}
-
-export async function claimTask(
-  client: SpecflowClient,
-  taskId: string,
-  workerId: string,
-): Promise<ClaimedTask | null> {
-  try {
-    const result = await client.claimTask(taskId, workerId)
-    if (!result || !result.task) return null
-    return {
-      id: result.task.id,
-      featureId: result.task.feature,
-      record: result.task,
-      runId: result.run_id,
-    }
-  } catch (err: any) {
-    console.warn('[worker] claim notice:', err.message)
-    return null
-  }
-}

@@ -82,36 +82,6 @@ export class SpecflowClient {
     return (await res.json()) as { status: string; worker_id: string };
   }
 
-  async getPendingTasks(): Promise<WorkerClaimedTask[]> {
-    const res = await fetch(`${this.baseUrl}/api/worker/tasks/pending`, {
-      method: 'GET',
-      headers: this.authHeaders,
-    });
-
-    if (!res.ok) {
-      const text = await res.text().catch(() => '');
-      throw new Error(`Failed to fetch pending tasks (${res.status}): ${text || res.statusText}`);
-    }
-
-    const data = (await res.json()) as { tasks: WorkerClaimedTask[] };
-    return data.tasks || [];
-  }
-
-  async claimTask(taskId: string, workerId: string): Promise<WorkerClaimResult> {
-    const res = await fetch(`${this.baseUrl}/api/worker/tasks/${encodeURIComponent(taskId)}/claim`, {
-      method: 'POST',
-      headers: this.authHeaders,
-      body: JSON.stringify({ worker_id: workerId }),
-    });
-
-    if (!res.ok) {
-      const text = await res.text().catch(() => '');
-      throw new Error(`Failed to claim task "${taskId}" (${res.status}): ${text || res.statusText}`);
-    }
-
-    return (await res.json()) as WorkerClaimResult;
-  }
-
   async sendEvents(taskId: string, runId: string, events: WorkerEventItem[]): Promise<number> {
     const res = await fetch(`${this.baseUrl}/api/worker/tasks/${encodeURIComponent(taskId)}/events`, {
       method: 'POST',
@@ -155,14 +125,13 @@ export class SpecflowClient {
   }
 
   /**
-   * Connect to the SSE task stream.
+   * Connect to the SSE control stream.
    * Auto-reconnects with exponential backoff on disconnect.
    * Returns a cleanup disposer function.
    */
   connectStream(
-    onTaskAvailable: (data: { task_id: string; feature: string }) => void,
+    onControl: (data: { action: string; [key: string]: any }) => void,
     onError?: (err: Error) => void,
-    onControl?: (data: { action: string; task_id?: string; taskId?: string; feature?: string }) => void,
   ): () => void {
     let closed = false;
     let currentController: AbortController | null = null;
@@ -216,17 +185,10 @@ export class SpecflowClient {
               }
             }
 
-            if (eventType === 'task_available' && dataStr) {
+            if (eventType === 'worker_control' && dataStr) {
               try {
                 const parsed = JSON.parse(dataStr);
-                onTaskAvailable(parsed);
-              } catch (e: any) {
-                console.warn('[worker-sse] Failed to parse task_available payload:', e?.message);
-              }
-            } else if (eventType === 'worker_control' && dataStr) {
-              try {
-                const parsed = JSON.parse(dataStr);
-                onControl?.(parsed);
+                onControl(parsed);
               } catch (e: any) {
                 console.warn('[worker-sse] Failed to parse worker_control payload:', e?.message);
               }

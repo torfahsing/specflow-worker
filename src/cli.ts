@@ -8,7 +8,7 @@
 import { loadConfig, saveWorkerEnv, type WorkerConfig } from './config.js'
 import { SpecflowClient } from './client.js'
 import { Presence } from './presence.js'
-import { drainQueued, claimTask, subscribeToQueued, type ClaimedTask } from './queue.js'
+import { subscribeToControl, type ClaimedTask } from './queue.js'
 import { executeClaimedTask } from './runner.js'
 import { HttpWorkerStore } from './store.js'
 import { discoverLocalManifest, probeCapabilities, probeModels, probeQuota } from './discovery.js'
@@ -19,7 +19,6 @@ import * as git from './git/utils.js'
 // ---------------------------------------------------------------------------
 
 const DEFAULT_WORKER_HEARTBEAT_MS = 30_000
-const DEFAULT_WORKER_POLL_INTERVAL_MS = 10_000
 const SHUTDOWN_FINALIZE_CAP_MS = 5_000
 
 // ---------------------------------------------------------------------------
@@ -248,6 +247,7 @@ async function runDaemon(): Promise<void> {
   console.log(`[worker] registered: worker_id=${workerId}`)
 
   const pending = new Set<string>()
+  const taskPayloads = new Map<string, { task: any; runId?: string }>()
   interface ActiveTaskInfo {
     taskId: string
     featureId: string
@@ -258,17 +258,9 @@ async function runDaemon(): Promise<void> {
   const concurrency = config.concurrency ?? 1
   let shuttingDown = false
   let unsub: (() => Promise<void>) | null = null
-  let pollInterval: ReturnType<typeof setInterval> | null = null
 
   const shutdownController = new AbortController()
   const store = new HttpWorkerStore(client)
-
-  async function drainAndEnqueue(): Promise<void> {
-    const ids = await drainQueued(client)
-    for (const id of ids) {
-      pending.add(id)
-    }
-  }
 
   async function pump(): Promise<void> {
     if (activeTasks.size >= concurrency || shuttingDown) return
@@ -277,8 +269,16 @@ async function runDaemon(): Promise<void> {
       const taskId = pending.values().next().value!
       pending.delete(taskId)
 
-      const claimed = await claimTask(client, taskId, workerId)
-      if (!claimed) continue
+      const payload = taskPayloads.get(taskId)
+      taskPayloads.delete(taskId)
+      if (!payload || !payload.task) continue
+
+      const claimed: ClaimedTask = {
+        id: taskId,
+        featureId: payload.task.feature || payload.task.featureId || '',
+        record: payload.task,
+        runId: payload.runId,
+      }
 
       const taskController = new AbortController()
       const onShutdown = () => taskController.abort()
@@ -314,6 +314,17 @@ async function runDaemon(): Promise<void> {
   }
 
   function handleControl(ctrl: { action: string; task_id?: string; taskId?: string; feature?: string; queryId?: string; command?: string; [key: string]: any }): void {
+    if (ctrl.action === 'run_task') {
+      const taskId = (ctrl.taskId || ctrl.task_id) as string | undefined
+      if (taskId && ctrl.task) {
+        console.log(`[worker] received run_task command for task "${taskId}"`)
+        taskPayloads.set(taskId, { task: ctrl.task, runId: ctrl.runId })
+        pending.add(taskId)
+        pump().catch(() => {})
+      }
+      return
+    }
+
     if (ctrl.action.startsWith('query:') || ctrl.action.startsWith('query_')) {
       const queryId = ctrl.queryId
       const command = ctrl.command || config.providerCommand || 'openrouter-agent'
@@ -467,47 +478,17 @@ async function runDaemon(): Promise<void> {
   }
 
   try {
-    await drainAndEnqueue()
-  } catch (err: any) {
-    console.error(`[worker] initial drain warning:`, err?.message || String(err))
-  }
-  pump().catch(() => {})
-
-  try {
-    unsub = await subscribeToQueued(
-      client,
-      (taskId) => {
-        if (shuttingDown) return
-        pending.add(taskId)
-        pump().catch(() => {})
-      },
-      handleControl,
-    )
+    unsub = await subscribeToControl(client, handleControl)
     console.log(`[worker] SSE subscription established`)
   } catch (err: any) {
-    console.warn(`[worker] SSE subscribe failed (${err?.message || String(err)}), falling back to polling`)
+    console.warn(`[worker] SSE subscribe failed (${err?.message || String(err)})`)
   }
-
-  pollInterval = setInterval(async () => {
-    if (shuttingDown) return
-    try {
-      await drainAndEnqueue()
-      pump().catch(() => {})
-    } catch {
-      // transient poll error
-    }
-  }, DEFAULT_WORKER_POLL_INTERVAL_MS)
 
   let shutdownDone = false
   async function shutdown(signal: string): Promise<void> {
     if (shutdownDone) return
     shuttingDown = true
     console.log(`[worker] received ${signal}, shutting down gracefully...`)
-
-    if (pollInterval !== null) {
-      clearInterval(pollInterval)
-      pollInterval = null
-    }
 
     if (unsub !== null) {
       await unsub().catch(() => {})
