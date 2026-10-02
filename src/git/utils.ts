@@ -167,7 +167,16 @@ export async function isGitRepo(dir: string): Promise<boolean> {
 
 export async function initRepo(dir: string): Promise<void> {
   try {
+    const { mkdir } = await import('node:fs/promises')
+    await mkdir(dir, { recursive: true })
     await Bun.$`git -C ${dir} init`.quiet()
+    await Bun.$`git -C ${dir} checkout -b main`.quiet().catch(() => {})
+    const hasEmail = (await Bun.$`git -C ${dir} config user.email`.text().catch(() => '')).trim()
+    if (!hasEmail) {
+      await Bun.$`git -C ${dir} config user.email specflow@local`.quiet().catch(() => {})
+      await Bun.$`git -C ${dir} config user.name SpecFlow`.quiet().catch(() => {})
+    }
+    await Bun.$`git -C ${dir} commit --allow-empty -m "Initial commit"`.quiet().catch(() => {})
   } catch (err) {
     throw new Error(`Failed to init repo at '${dir}': ${(err as Error).message}`)
   }
