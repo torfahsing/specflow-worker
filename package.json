@@ -2,6 +2,9 @@
   "name": "@specflow/worker",
   "module": "index.ts",
   "type": "module",
+  "bin": {
+    "specflow-worker": "./bin/specflow-worker"
+  },
   "private": true,
   "scripts": {
     "start": "bun run src/cli.ts start",
