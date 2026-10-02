@@ -95,6 +95,19 @@ export async function executeClaimedTask(
   const outputSchema = record.output_schema as Record<string, any> | undefined
 
   // Step 3: pre-run input failures
+  const roleName = ((record.role || record.agent || '') as string).toLowerCase()
+  const taskType = ((record.type || record.task_type || '') as string).toLowerCase()
+  const EXCLUDED_ROLES = new Set(['colleague', 'chat', 'colleague_chat', 'colleague-chat'])
+  const EXCLUDED_TYPES = new Set(['chat', 'colleague_chat', 'colleague-chat', 'conversation'])
+
+  if (EXCLUDED_ROLES.has(roleName) || EXCLUDED_TYPES.has(taskType)) {
+    const error = `Colleague chat tasks are handled by orchestrator, not worker (task "${taskId}").`
+    await recorder.finalize({ status: 'failed', error })
+    await store.updateTask(taskId, { status: 'failed', error })
+    presence.setBusy(false)
+    return { status: 'failed', runId: recorder.runId, error }
+  }
+
   if (!prompt) {
     const error = `Task "${taskId}" has no "prompt" — prompt assembly happens upstream before queueing.`
     await recorder.finalize({ status: 'failed', error })

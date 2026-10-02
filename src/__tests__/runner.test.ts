@@ -514,6 +514,26 @@ describe('executeClaimedTask — pre-run input failures', () => {
     expect(presence.busyCalls).toContain(false)
   })
 
+  it('rejects colleague chat tasks with an actionable error', async () => {
+    const store = makeMemoryStore()
+    const presence = new StubPresence()
+    const deps = makeDeps({ store, presence })
+
+    const task = makeClaimedTask({ role: 'colleague', prompt: 'Hello colleague' })
+    const signal = new AbortController().signal
+
+    const outcome = await executeClaimedTask(task as ClaimedTask, deps, signal)
+
+    expect(outcome.status).toBe('failed')
+    expect(outcome.error).toContain('Colleague chat tasks are handled by orchestrator, not worker')
+
+    const runs = Array.from(store.runs.values())
+    expect(runs[0]!.status).toBe('failed')
+    expect(runs[0]!.error).toContain('Colleague chat tasks are handled by orchestrator, not worker')
+
+    expect(presence.busyCalls).toContain(false)
+  })
+
   it('fails cleanly when provider_command is missing', async () => {
     const store = makeMemoryStore()
     const presence = new StubPresence()
