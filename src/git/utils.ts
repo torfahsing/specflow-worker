@@ -27,9 +27,24 @@ export async function branchExists(dir: string, branch: string): Promise<boolean
   }
 }
 
-export async function createBranch(dir: string, branch: string): Promise<void> {
+export async function getDefaultBranch(dir: string): Promise<string> {
+  if (await branchExists(dir, 'main')) return 'main'
+  if (await branchExists(dir, 'master')) return 'master'
+  return 'main'
+}
+
+export async function createBranch(
+  dir: string,
+  branch: string,
+  startPoint?: string,
+): Promise<void> {
   try {
-    await Bun.$`git -C ${dir} branch ${branch}`.text()
+    const base = startPoint || (await getDefaultBranch(dir))
+    if (await branchExists(dir, base)) {
+      await Bun.$`git -C ${dir} branch ${branch} ${base}`.text()
+    } else {
+      await Bun.$`git -C ${dir} branch ${branch}`.text()
+    }
   } catch (err) {
     throw new Error(`Failed to create branch '${branch}': ${(err as Error).message}`)
   }

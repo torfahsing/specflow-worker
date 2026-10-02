@@ -127,8 +127,11 @@ export async function executeClaimedTask(
       const current = await gitModule.getCurrentBranch(cwd)
       if (current !== branch) {
         if (!(await gitModule.branchExists(cwd, branch))) {
-          console.log(`[git] creating missing branch '${branch}'`)
-          await gitModule.createBranch(cwd, branch)
+          const defaultBranch = gitModule.getDefaultBranch
+            ? await gitModule.getDefaultBranch(cwd)
+            : 'main'
+          console.log(`[git] creating missing branch '${branch}' from '${defaultBranch}'`)
+          await gitModule.createBranch(cwd, branch, defaultBranch)
         }
         console.log(`[git] switching to branch '${branch}' (was '${current}')`)
         await gitModule.checkoutBranch(cwd, branch)
