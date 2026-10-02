@@ -348,11 +348,13 @@ export async function runProvider(
 
   // --- Drain stderr concurrently ---
   let stderr = ''
+  const stderrDecoder = new TextDecoder('utf-8')
   const stderrDrain = (async () => {
     try {
       for await (const chunk of proc.stderr) {
-        stderr += chunk.toString()
+        stderr += stderrDecoder.decode(chunk, { stream: true })
       }
+      stderr += stderrDecoder.decode()
     } catch {
       // stderr stream ended or was aborted
     }
