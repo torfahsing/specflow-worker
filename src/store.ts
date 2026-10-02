@@ -8,7 +8,7 @@
  * occurs over HTTP/SSE with the Specflow orchestrator.
  */
 
-import type { SpecflowClient } from './client.js'
+import type { SpecflowClient, WorkerEventItem } from './client.js'
 
 // ---------------------------------------------------------------------------
 // Types (single source of truth for run event types)
@@ -33,6 +33,7 @@ export type RunStatus = 'running' | 'completed' | 'failed' | 'cancelled'
 
 export interface RunRecord {
   status?: RunStatus
+  output?: unknown
   inputTokens?: number
   outputTokens?: number
   costUsd?: number
@@ -61,6 +62,10 @@ export interface WorkerStore {
 
 export class HttpWorkerStore implements WorkerStore {
   private activeTaskId = ''
+  private activeRunId: string | null = null
+  private eventBuffer: WorkerEventItem[] = []
+  private flushTimer: ReturnType<typeof setTimeout> | null = null
+  private pendingFlush: Promise<void> = Promise.resolve()
 
   constructor(private client: SpecflowClient) {}
 
@@ -70,14 +75,47 @@ export class HttpWorkerStore implements WorkerStore {
 
   async createRun(input: { taskId: string; featureId: string }): Promise<string> {
     this.activeTaskId = input.taskId
-    return `run_${input.taskId}`
+    const runId = `run_${input.taskId}`
+    this.activeRunId = runId
+    return runId
+  }
+
+  private async flushEvents(): Promise<void> {
+    if (this.flushTimer) {
+      clearTimeout(this.flushTimer)
+      this.flushTimer = null
+    }
+
+    if (this.eventBuffer.length === 0 || !this.activeTaskId || !this.activeRunId) {
+      return
+    }
+
+    const batch = [...this.eventBuffer]
+    this.eventBuffer = []
+    const taskId = this.activeTaskId
+    const runId = this.activeRunId
+
+    this.pendingFlush = this.pendingFlush
+      .then(async () => {
+        await this.client.sendEvents(taskId, runId, batch)
+      })
+      .catch((err) => {
+        console.warn('[store] sendEvents notice:', err?.message || String(err))
+      })
+
+    await this.pendingFlush
   }
 
   async updateRun(runId: string, patch: Partial<RunRecord>): Promise<void> {
+    this.activeRunId = runId
+    await this.flushEvents()
+    await this.pendingFlush
+
     const status = patch.status === 'completed' ? 'completed' : 'failed'
     await this.client.finishTask(this.activeTaskId, {
       run_id: runId,
       status,
+      output: patch.output,
       error: patch.error,
       input_tokens: patch.inputTokens ?? (patch as any).input_tokens,
       output_tokens: patch.outputTokens ?? (patch as any).output_tokens,
@@ -97,15 +135,25 @@ export class HttpWorkerStore implements WorkerStore {
       console.warn(`[store] skipping unsupported run_event type "${type}"`)
       return
     }
-    // High-frequency streaming text/reasoning deltas are suppressed over HTTP
-    // to prevent socket saturation and database lock contention.
-    // UI triggers "Agent working..." based on phase and tool execution state.
-    if (type === 'text' || type === 'reasoning') {
-      return
+
+    this.activeRunId = runId
+    this.eventBuffer.push({ sequence, type, payload })
+
+    // High-priority events flush immediately; text and reasoning batch up with 75ms debounce
+    if (
+      this.eventBuffer.length >= 15 ||
+      type === 'tool_call' ||
+      type === 'tool_result' ||
+      type === 'error'
+    ) {
+      await this.flushEvents()
+    } else if (!this.flushTimer) {
+      this.flushTimer = setTimeout(() => {
+        this.flushEvents().catch((err) => {
+          console.warn('[store] flushEvents notice:', err?.message || String(err))
+        })
+      }, 75)
     }
-    await this.client.sendEvents(this.activeTaskId, runId, [{ sequence, type, payload }]).catch((err) => {
-      console.warn('[store] sendEvents notice:', err?.message || String(err))
-    })
   }
 
   async updateTask(_taskId: string, _patch: Record<string, unknown>): Promise<void> {
@@ -122,6 +170,7 @@ export interface MemoryRunRecord {
   taskId: string
   featureId: string
   status: RunStatus
+  output?: unknown
   inputTokens: number | undefined
   outputTokens: number | undefined
   costUsd: number | undefined
@@ -153,6 +202,7 @@ export class MemoryWorkerStore implements WorkerStore {
       taskId: input.taskId,
       featureId: input.featureId,
       status: 'running',
+      output: undefined,
       inputTokens: undefined,
       outputTokens: undefined,
       costUsd: undefined,
@@ -165,6 +215,7 @@ export class MemoryWorkerStore implements WorkerStore {
     const run = this.runs.get(runId)
     if (!run) return
     if (patch.status !== undefined) run.status = patch.status
+    if (patch.output !== undefined) run.output = patch.output
     if (patch.inputTokens !== undefined) run.inputTokens = patch.inputTokens
     if ('input_tokens' in patch && patch.input_tokens !== undefined) run.inputTokens = patch.input_tokens as number
     if (patch.outputTokens !== undefined) run.outputTokens = patch.outputTokens

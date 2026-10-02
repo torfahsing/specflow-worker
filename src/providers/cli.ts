@@ -149,8 +149,9 @@ export function createNdjsonParser(
             obj.usage.output_tokens ??
             0,
         }
-        if (typeof obj.usage.cost === 'number') {
-          stream.cost = (stream.cost ?? 0) + obj.usage.cost
+        const costVal = obj.usage.cost ?? obj.usage.cost_usd ?? obj.cost ?? obj.cost_usd
+        if (typeof costVal === 'number') {
+          stream.cost = (stream.cost ?? 0) + costVal
         }
       } else if (obj.type === 'agent_end') {
         lastReasoningText = ''

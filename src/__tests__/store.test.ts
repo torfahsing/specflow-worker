@@ -109,6 +109,29 @@ describe('HttpWorkerStore — HTTP API delegation', () => {
       store.updateRun('run_t1', { status: 'failed', error: 'some error' }),
     ).resolves.toBeUndefined()
   })
+
+  it('batches text/reasoning events and flushes before finishTask', async () => {
+    const { client, calls, sentEvents, finishedPayloads } = makeStubClient()
+    const store = new HttpWorkerStore(client)
+
+    await store.createRun({ taskId: 't_stream', featureId: 'f1' })
+    await store.emitRunEvent('run_t_stream', 1, 'text', { content: 'hello ' })
+    await store.emitRunEvent('run_t_stream', 2, 'text', { content: 'world' })
+
+    // Events are buffered in memory and not yet sent immediately
+    expect(calls.sendEvents).toBe(0)
+
+    // Finalizing run flushes buffered events before finishTask
+    await store.updateRun('run_t_stream', { status: 'completed', output: 'hello world' })
+
+    expect(calls.sendEvents).toBe(1)
+    expect(sentEvents[0].events).toHaveLength(2)
+    expect(sentEvents[0].events[0].payload).toEqual({ content: 'hello ' })
+    expect(sentEvents[0].events[1].payload).toEqual({ content: 'world' })
+
+    expect(calls.finishTask).toBe(1)
+    expect(finishedPayloads[0].output).toBe('hello world')
+  })
 })
 
 // ---------------------------------------------------------------------------

@@ -119,6 +119,7 @@ export class RunRecorder {
    */
   async finalize(outcome: {
     status: RunStatus
+    output?: unknown
     tokens?: { input: number; output: number }
     costUsd?: number
     error?: string
@@ -128,6 +129,9 @@ export class RunRecorder {
     this.finalized = true
 
     const patch: Record<string, unknown> = { status: outcome.status }
+    if (outcome.output !== undefined) {
+      patch.output = outcome.output
+    }
     if (outcome.tokens) {
       patch.input_tokens = outcome.tokens.input
       patch.output_tokens = outcome.tokens.output

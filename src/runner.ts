@@ -353,9 +353,13 @@ export async function executeClaimedTask(
 
   const tokens = result.stream.tokens
   const costUsd = result.stream.cost
+  const taskOutput = parsedStructuredOutput !== undefined
+    ? parsedStructuredOutput
+    : (result.stream.resultText || undefined)
 
   await recorder.finalize({
     status: 'completed',
+    output: taskOutput,
     tokens: tokens
       ? { input: tokens.input, output: tokens.output }
       : undefined,
@@ -364,7 +368,7 @@ export async function executeClaimedTask(
 
   await store.updateTask(taskId, {
     status: 'done',
-    output: parsedStructuredOutput,
+    output: taskOutput,
   })
   presence.setBusy(false)
   effectiveSignal?.removeEventListener('abort', abortListener)
@@ -372,7 +376,7 @@ export async function executeClaimedTask(
   return {
     status: 'done',
     runId: recorder.runId,
-    output: parsedStructuredOutput,
+    output: taskOutput,
   }
 }
 
