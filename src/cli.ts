@@ -5,6 +5,7 @@
  * Single-slot serial work pump, graceful shutdown on SIGINT/SIGTERM.
  */
 
+import path from 'node:path'
 import { loadConfig, saveWorkerEnv, type WorkerConfig } from './config.js'
 import { SpecflowClient } from './client.js'
 import { Presence } from './presence.js'
@@ -449,6 +450,101 @@ async function runDaemon(): Promise<void> {
           }
         } catch (err: any) {
           console.warn(`[worker] git action "${ctrl.action}" failed:`, err?.message || String(err))
+          await client.sendQueryResponse(queryId, null, err?.message || String(err)).catch(() => {})
+        }
+      })
+      return
+    }
+
+    if (ctrl.action.startsWith('fs:')) {
+      const queryId = ctrl.queryId
+      if (!queryId) return
+
+      Promise.resolve().then(async () => {
+        try {
+          if (ctrl.action === 'fs:read_file') {
+            const filePath = ctrl.path as string
+            const maxBytes = typeof ctrl.maxBytes === 'number' ? ctrl.maxBytes : 500_000
+            const file = Bun.file(filePath)
+            if (!(await file.exists())) {
+              await client.sendQueryResponse(queryId, { content: null })
+            } else {
+              let content = await file.text()
+              if (content.length > maxBytes) {
+                content = content.slice(0, maxBytes)
+              }
+              await client.sendQueryResponse(queryId, { content })
+            }
+          } else if (ctrl.action === 'fs:find_files') {
+            const dir = ctrl.dir as string
+            const rawPatterns: string[] = Array.isArray(ctrl.patterns)
+              ? ctrl.patterns
+              : (ctrl.pattern ? [ctrl.pattern] : [])
+            const maxResults = typeof ctrl.maxResults === 'number' ? ctrl.maxResults : 50
+
+            const SKIP = new Set(['node_modules', '.git', 'dist', 'build', '.next', 'coverage', '.cache', '__pycache__'])
+            const results: string[] = []
+
+            const walk = async (currentDir: string, relative: string) => {
+              if (results.length >= maxResults) return
+              try {
+                const { readdir } = await import('node:fs/promises')
+                const entries = await readdir(currentDir, { withFileTypes: true }).catch(() => [])
+                for (const entry of entries) {
+                  if (SKIP.has(entry.name)) continue
+                  const relPath = relative ? `${relative}/${entry.name}` : entry.name
+                  if (entry.isDirectory()) {
+                    await walk(path.join(currentDir, entry.name), relPath)
+                  } else if (rawPatterns.length === 0 || rawPatterns.some(p => entry.name.includes(p))) {
+                    results.push(relPath)
+                    if (results.length >= maxResults) return
+                  }
+                }
+              } catch {}
+            }
+
+            await walk(dir, '')
+            await client.sendQueryResponse(queryId, { files: results })
+          } else if (ctrl.action === 'fs:get_tree') {
+            const dir = ctrl.dir as string
+            const maxDepth = typeof ctrl.maxDepth === 'number' ? ctrl.maxDepth : 3
+            const maxTreeChars = typeof ctrl.maxTreeChars === 'number' ? ctrl.maxTreeChars : 32_000
+
+            const SKIP = new Set(['node_modules', '.git', 'dist', 'build', '.next', 'coverage', '.cache', '__pycache__'])
+            const lines: string[] = []
+
+            const walk = async (currentDir: string, prefix: string, depth: number) => {
+              if (depth > maxDepth || lines.length > 500) return
+              try {
+                const { readdir } = await import('node:fs/promises')
+                const entries = await readdir(currentDir, { withFileTypes: true }).catch(() => [])
+                entries.sort((a, b) => a.name.localeCompare(b.name))
+                for (const entry of entries) {
+                  if (SKIP.has(entry.name)) continue
+                  const isDir = entry.isDirectory()
+                  lines.push(`${prefix}${entry.name}${isDir ? '/' : ''}`)
+                  if (isDir && depth < maxDepth) {
+                    await walk(path.join(currentDir, entry.name), prefix + '  ', depth + 1)
+                  }
+                }
+              } catch {}
+            }
+
+            await walk(dir, '', 0)
+            if (lines.length === 0) {
+              await client.sendQueryResponse(queryId, { tree: null })
+            } else {
+              let result = lines.join('\n')
+              if (result.length > maxTreeChars) {
+                result = result.slice(0, maxTreeChars) + '\n...[truncated]'
+              }
+              await client.sendQueryResponse(queryId, { tree: result })
+            }
+          } else {
+            await client.sendQueryResponse(queryId, null, `Unknown fs action: ${ctrl.action}`)
+          }
+        } catch (err: any) {
+          console.warn(`[worker] fs action "${ctrl.action}" failed:`, err?.message || String(err))
           await client.sendQueryResponse(queryId, null, err?.message || String(err)).catch(() => {})
         }
       })
