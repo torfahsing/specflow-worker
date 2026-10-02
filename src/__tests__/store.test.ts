@@ -75,13 +75,13 @@ describe('HttpWorkerStore — HTTP API delegation', () => {
     const store = new HttpWorkerStore(client)
 
     await store.createRun({ taskId: 'task_1', featureId: 'feat_1' })
-    await store.emitRunEvent('run_task_1', 1, 'text', { content: 'hello' })
+    await store.emitRunEvent('run_task_1', 1, 'tool_call', { name: 'file_read' })
 
     expect(calls.sendEvents).toBe(1)
     expect(sentEvents[0]).toEqual({
       taskId: 'task_1',
       runId: 'run_task_1',
-      events: [{ sequence: 1, type: 'text', payload: { content: 'hello' } }],
+      events: [{ sequence: 1, type: 'tool_call', payload: { name: 'file_read' } }],
     })
   })
 

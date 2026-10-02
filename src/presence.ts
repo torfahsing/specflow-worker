@@ -76,7 +76,7 @@ export class Presence {
       const res = await this.client.heartbeat({
         worker_name: this.workerName,
         status,
-        capabilities: this.capabilities,
+        // capabilities omitted — sent once on initial registration via ensure()
       })
       if (res?.worker_id) {
         this.workerId = res.worker_id

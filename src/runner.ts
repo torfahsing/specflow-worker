@@ -85,7 +85,9 @@ export async function executeClaimedTask(
   // Step 2: resolve execution inputs
   let prompt = record.prompt as string | undefined
   const command = record.provider_command as string | undefined
-  const model = record.model as string | undefined
+  const models: string[] = Array.isArray(record.models)
+    ? record.models
+    : (record.model ? [record.model] : [])  // back-compat: old single-model tasks
   const allowedTools = coerceArray(record.allowed_tools)
   const timeoutMs = normalizeTimeout(record.timeout)
   const cwd = (feature.project_dir || record.project_dir) as string | undefined
@@ -162,43 +164,59 @@ export async function executeClaimedTask(
     }
   }
 
-  // Step 5: spawn with AbortController linked to shutdown signal
+  // Step 5: spawn — iterate through models locally, no round-trip per retry
   const controller = new AbortController()
   const abortListener = () => controller.abort()
   if (effectiveSignal) {
     effectiveSignal.addEventListener('abort', abortListener, { once: true })
   }
 
-  let result: ProviderRunResult
-  let cancelled = false
+  const modelsToTry = models.length > 0 ? models : [undefined]  // undefined = provider default
+  let result: ProviderRunResult | undefined
+  let lastError: string | undefined
 
-  try {
+  for (let i = 0; i < modelsToTry.length; i++) {
+    const model = modelsToTry[i]
+    const attempt = `${i + 1}/${modelsToTry.length}`
     console.log(
-      `[runner] executeClaimedTask: task=${taskId} feature=${featureId} cwd=${cwd} branch=${branch ?? 'none'} provider=${command} model=${model ?? 'none'} timeout=${timeoutMs / 1000}s`,
+      `[runner] executeClaimedTask: task=${taskId} feature=${featureId} cwd=${cwd} branch=${branch ?? 'none'} provider=${command} model=${model ?? 'default'} attempt=${attempt} timeout=${timeoutMs / 1000}s`,
     )
 
-    result = await runProviderFn(
-      {
-        command,
-        model,
-        allowedTools,
-        prompt,
-        cwd,
-        timeoutMs,
-        signal: controller.signal,
-        pathOverride: config.pathOverride,
-        extraEnv: config.envValues,
-        outputSchemaPath: stagedSchemaPath,
-      },
-      async (e: ProviderEvent) => {
-        await recorder.emit(e.type, e.payload)
-      },
-    )
-  } catch (err) {
-    if (stagedSchemaPath) {
-      await rm(stagedSchemaPath, { force: true }).catch(() => {})
+    try {
+      result = await runProviderFn(
+        {
+          command,
+          model,
+          allowedTools,
+          prompt,
+          cwd,
+          timeoutMs,
+          signal: controller.signal,
+          pathOverride: config.pathOverride,
+          extraEnv: config.envValues,
+          outputSchemaPath: stagedSchemaPath,
+        },
+        async (e: ProviderEvent) => {
+          await recorder.emit(e.type, e.payload)
+        },
+      )
+      if (!result.error && !result.cancelled) break  // success — stop trying
+      lastError = result.error
+      if (result.cancelled) break  // aborted — don't try next model
+      if (i < modelsToTry.length - 1) {
+        console.log(`[runner] model "${model}" failed, trying next model...`)
+      }
+    } catch (err) {
+      lastError = (err as Error).message
+      if (i < modelsToTry.length - 1) {
+        console.log(`[runner] model "${model}" threw error: ${lastError}, trying next model...`)
+      }
     }
-    const error = (err as Error).message
+  }
+
+  if (!result) {
+    if (stagedSchemaPath) await rm(stagedSchemaPath, { force: true }).catch(() => {})
+    const error = lastError ?? 'All models failed'
     await recorder.finalize({ status: 'failed', error })
     await store.updateTask(taskId, { status: 'failed', error })
     presence.setBusy(false)
@@ -207,9 +225,7 @@ export async function executeClaimedTask(
   }
 
   // Step 6: classification determines outcome
-  cancelled = result.cancelled
-
-  if (cancelled) {
+  if (result.cancelled) {
     if (stagedSchemaPath) {
       await rm(stagedSchemaPath, { force: true }).catch(() => {})
     }
@@ -250,7 +266,7 @@ export async function executeClaimedTask(
           const repairResult = await runProviderFn(
             {
               command,
-              model,
+              model: result.model ?? modelsToTry[modelsToTry.length - 1],
               allowedTools: [],
               prompt: repairPrompt,
               cwd,
@@ -296,7 +312,7 @@ export async function executeClaimedTask(
     await recorder.finalize({ status: 'failed', error: result.error })
     await store.updateTask(taskId, { status: 'failed', error: result.error })
     presence.setBusy(false)
-    signal.removeEventListener('abort', abortListener)
+    effectiveSignal?.removeEventListener('abort', abortListener)
     return { status: 'failed', runId: recorder.runId, error: result.error }
   }
 

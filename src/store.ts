@@ -97,6 +97,12 @@ export class HttpWorkerStore implements WorkerStore {
       console.warn(`[store] skipping unsupported run_event type "${type}"`)
       return
     }
+    // High-frequency streaming text/reasoning deltas are suppressed over HTTP
+    // to prevent socket saturation and database lock contention.
+    // UI triggers "Agent working..." based on phase and tool execution state.
+    if (type === 'text' || type === 'reasoning') {
+      return
+    }
     await this.client.sendEvents(this.activeTaskId, runId, [{ sequence, type, payload }]).catch((err) => {
       console.warn('[store] sendEvents notice:', err?.message || String(err))
     })

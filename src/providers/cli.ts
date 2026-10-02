@@ -310,7 +310,7 @@ export async function runProvider(
   let lineBuffer = ''
 
   // Drain stdout chunk-by-chunk
-  ;(async () => {
+  const stdoutDrain = (async () => {
     try {
       for await (const chunk of proc.stdout) {
         lineBuffer += decoder.decode(chunk, { stream: true })
@@ -327,7 +327,7 @@ export async function runProvider(
 
   // --- Drain stderr concurrently ---
   let stderr = ''
-  ;(async () => {
+  const stderrDrain = (async () => {
     try {
       for await (const chunk of proc.stderr) {
         stderr += chunk.toString()
@@ -337,8 +337,8 @@ export async function runProvider(
     }
   })()
 
-  // --- Wait for process exit ---
-  const exitCode = await proc.exited
+  // --- Wait for process exit and streams to drain ---
+  const [exitCode] = await Promise.all([proc.exited, stdoutDrain, stderrDrain])
   const signalCode = proc.signalCode
 
   // --- Flush any remaining partial line ---

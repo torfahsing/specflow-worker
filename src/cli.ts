@@ -228,19 +228,19 @@ async function runDaemon(): Promise<void> {
     token: config.specflowToken,
   })
 
-  const manifest = await discoverLocalManifest()
-  if (manifest.models.length > 0) {
-    console.log(`[worker] discovered ${manifest.models.length} models from local provider CLI`)
-  }
+  const presence = new Presence(client, config.workerName, undefined, DEFAULT_WORKER_HEARTBEAT_MS)
 
-  const presence = new Presence(client, config.workerName, manifest, DEFAULT_WORKER_HEARTBEAT_MS)
-  const workerId = await presence.ensure()
-
-  if (!workerId) {
-    console.error(
-      `[worker] FATAL: Failed to authenticate or register presence with Specflow at ${config.specflowUrl}. Verify SPECFLOW_TOKEN.`,
-    )
-    process.exit(1)
+  // Retry registration with backoff — worker can start before specflow is up.
+  let workerId: string | null = null
+  let attempt = 0
+  while (!workerId) {
+    workerId = await presence.ensure()
+    if (!workerId) {
+      const delay = Math.min(1000 * 2 ** attempt, 30000)
+      console.log(`[worker] specflow not reachable at ${config.specflowUrl}, retrying in ${delay / 1000}s...`)
+      await new Promise(r => setTimeout(r, delay))
+      attempt++
+    }
   }
 
   presence.start()

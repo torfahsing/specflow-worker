@@ -139,6 +139,7 @@ export class RunRecorder {
       patch.error = outcome.error
     }
 
+    await this.pending
     await this.store.updateRun(this._runId, patch)
     console.log(
       `[runner] run ${this._runId} finalized: ${outcome.status} (${this.eventCount} events)`,
