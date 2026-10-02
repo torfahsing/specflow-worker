@@ -64,9 +64,12 @@ function coerceArray(value: unknown): string[] {
 export async function executeClaimedTask(
   claimed: ClaimedTask,
   deps: RunDeps,
-  signal: AbortSignal,
+  signal?: AbortSignal,
 ): Promise<ExecutionOutcome> {
-  const { store, presence, config, git, provider } = deps
+  const effectiveSignal = signal ?? (deps as any).abortSignal ?? (deps as any).signal
+  const effectiveConfig = deps.config ?? (deps as any).workerConfig ?? {}
+  const { store, presence, git, provider } = deps
+  const config = effectiveConfig
   const gitModule = git ?? await import('./git/utils.js')
   const runProviderFn = provider ?? (await import('./providers/cli.js')).runProvider
 
@@ -162,7 +165,9 @@ export async function executeClaimedTask(
   // Step 5: spawn with AbortController linked to shutdown signal
   const controller = new AbortController()
   const abortListener = () => controller.abort()
-  signal.addEventListener('abort', abortListener, { once: true })
+  if (effectiveSignal) {
+    effectiveSignal.addEventListener('abort', abortListener, { once: true })
+  }
 
   let result: ProviderRunResult
   let cancelled = false
@@ -197,7 +202,7 @@ export async function executeClaimedTask(
     await recorder.finalize({ status: 'failed', error })
     await store.updateTask(taskId, { status: 'failed', error })
     presence.setBusy(false)
-    signal.removeEventListener('abort', abortListener)
+    effectiveSignal?.removeEventListener('abort', abortListener)
     return { status: 'failed', runId: recorder.runId, error }
   }
 
@@ -220,7 +225,7 @@ export async function executeClaimedTask(
       assigned_worker: null,
     })
     presence.setBusy(false)
-    signal.removeEventListener('abort', abortListener)
+    effectiveSignal?.removeEventListener('abort', abortListener)
     return { status: 'cancelled', runId: recorder.runId }
   }
 
@@ -312,7 +317,7 @@ export async function executeClaimedTask(
     output: parsedStructuredOutput,
   })
   presence.setBusy(false)
-  signal.removeEventListener('abort', abortListener)
+  effectiveSignal?.removeEventListener('abort', abortListener)
 
   return {
     status: 'done',

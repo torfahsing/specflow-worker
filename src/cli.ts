@@ -277,9 +277,9 @@ async function runDaemon(): Promise<void> {
         {
           store,
           presence,
-          workerConfig: config,
-          abortSignal: shutdownController.signal,
+          config,
         },
+        shutdownController.signal,
       )
         .catch((err) => {
           console.error(`[worker] task execution error:`, err?.message || String(err))
