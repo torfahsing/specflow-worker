@@ -1,5 +1,5 @@
 import { describe, it, expect } from 'bun:test'
-import { parseEnv, resolveConfig, loadConfig } from '../config'
+import { parseEnv, resolveConfig, loadConfig, saveWorkerEnv } from '../config'
 import path from 'node:path'
 import { mkdtemp, rm, mkdir } from 'node:fs/promises'
 import { tmpdir, hostname } from 'node:os'
@@ -162,7 +162,7 @@ describe('loadConfig', () => {
     await rm(tmpDir, { recursive: true, force: true })
   })
 
-  it('never writes the worker.env file', async () => {
+  it('never writes the worker.env file in loadConfig', async () => {
     const tmpDir = await mkdtemp(path.join(tmpdir(), 'specflow-worker-config-'))
     const envPath = path.join(tmpDir, 'worker.env')
 
@@ -173,6 +173,49 @@ describe('loadConfig', () => {
 
     const exists = await Bun.file(envPath).exists()
     expect(exists).toBe(false)
+
+    await rm(tmpDir, { recursive: true, force: true })
+  })
+})
+
+describe('saveWorkerEnv', () => {
+  it('creates directory and writes worker configuration', async () => {
+    const tmpDir = await mkdtemp(path.join(tmpdir(), 'specflow-worker-config-'))
+    const envPath = path.join(tmpDir, '.specflow', 'worker.env')
+
+    const saved = await saveWorkerEnv(
+      {
+        specflowUrl: 'https://dogfood.specflow.dev',
+        specflowToken: 'sfw_live_test123',
+        workerName: 'test-runner',
+      },
+      envPath,
+    )
+
+    expect(saved).toBe(envPath)
+    const text = await Bun.file(envPath).text()
+    expect(text).toContain('SPECFLOW_URL=https://dogfood.specflow.dev')
+    expect(text).toContain('SPECFLOW_TOKEN=sfw_live_test123')
+    expect(text).toContain('WORKER_NAME=test-runner')
+
+    await rm(tmpDir, { recursive: true, force: true })
+  })
+
+  it('preserves existing custom keys when updating', async () => {
+    const tmpDir = await mkdtemp(path.join(tmpdir(), 'specflow-worker-config-'))
+    const envPath = path.join(tmpDir, 'worker.env')
+    await Bun.write(envPath, 'CUSTOM_VAR=hello\nSPECFLOW_TOKEN=old_token\n')
+
+    await saveWorkerEnv(
+      {
+        specflowToken: 'new_token',
+      },
+      envPath,
+    )
+
+    const text = await Bun.file(envPath).text()
+    expect(text).toContain('CUSTOM_VAR=hello')
+    expect(text).toContain('SPECFLOW_TOKEN=new_token')
 
     await rm(tmpDir, { recursive: true, force: true })
   })

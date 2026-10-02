@@ -136,3 +136,51 @@ export async function loadConfig(overrides?: {
   const config = resolveConfig(env, fileValues)
   return { ...config, workerEnvPath }
 }
+
+/**
+ * Save worker configuration to worker.env.
+ * Creates parent directory if missing and preserves non-overridden variables.
+ */
+export async function saveWorkerEnv(
+  values: {
+    specflowUrl?: string
+    specflowToken?: string
+    workerName?: string
+  },
+  workerEnvPath?: string,
+): Promise<string> {
+  const targetPath =
+    workerEnvPath ??
+    path.join(process.env.SPECFLOW_DIR ?? homedir(), '.specflow', 'worker.env')
+  const targetDir = path.dirname(targetPath)
+
+  const { mkdir } = await import('node:fs/promises')
+  await mkdir(targetDir, { recursive: true })
+
+  let existing: Record<string, string> = {}
+  try {
+    const f = Bun.file(targetPath)
+    if (await f.exists()) {
+      existing = parseEnv(await f.text())
+    }
+  } catch {
+    // empty if file does not exist
+  }
+
+  if (values.specflowUrl) existing.SPECFLOW_URL = values.specflowUrl
+  if (values.specflowToken) existing.SPECFLOW_TOKEN = values.specflowToken
+  if (values.workerName) existing.WORKER_NAME = values.workerName
+
+  const lines: string[] = [
+    '# Specflow Worker Configuration',
+    `# Updated: ${new Date().toISOString()}`,
+    '',
+  ]
+  for (const [k, v] of Object.entries(existing)) {
+    lines.push(`${k}=${v}`)
+  }
+  lines.push('')
+
+  await Bun.write(targetPath, lines.join('\n'))
+  return targetPath
+}
