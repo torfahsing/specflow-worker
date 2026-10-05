@@ -12,7 +12,7 @@ import { Presence } from './presence.js'
 import { subscribeToControl, type ClaimedTask } from './queue.js'
 import { executeClaimedTask } from './runner.js'
 import { HttpWorkerStore } from './store.js'
-import { discoverLocalManifest, probeCapabilities, probeModels, probeQuota } from './discovery.js'
+import { discoverLocalManifest, probeCapabilities, probeModels } from './discovery.js'
 import * as git from './git/utils.js'
 
 // ---------------------------------------------------------------------------
@@ -256,6 +256,7 @@ async function runDaemon(): Promise<void> {
     promise: Promise<unknown>
   }
   const activeTasks = new Map<string, ActiveTaskInfo>()
+  let activeChatTask: ActiveTaskInfo | null = null
   const concurrency = config.concurrency ?? 1
   let shuttingDown = false
   let unsub: (() => Promise<void>) | null = null
@@ -326,6 +327,60 @@ async function runDaemon(): Promise<void> {
       return
     }
 
+    if (ctrl.action === 'chat_step') {
+      const taskId = (ctrl.taskId || ctrl.task_id || `chat_${Date.now()}`) as string
+      console.log(`[worker] received chat_step command for task "${taskId}"`)
+      const taskRecord = ctrl.task || {
+        prompt: ctrl.prompt,
+        role: 'colleague',
+        task_type: 'chat_step',
+        provider_command: ctrl.command || config.providerCommand || 'openrouter-agent',
+        models: ctrl.models || (ctrl.model ? [ctrl.model] : []),
+        allowed_tools: ctrl.allowedTools || ['file_read', 'list_dir', 'grep', 'glob'],
+        project_dir: ctrl.cwd || ctrl.project_dir,
+        git_branch: ctrl.branch,
+        timeout: ctrl.timeout,
+      }
+      const claimed: ClaimedTask = {
+        id: taskId,
+        featureId: ctrl.featureId || ctrl.feature || '',
+        record: taskRecord,
+        runId: ctrl.runId,
+        isChat: true,
+      }
+
+      const taskController = new AbortController()
+      const onShutdown = () => taskController.abort()
+      shutdownController.signal.addEventListener('abort', onShutdown, { once: true })
+
+      const promise = executeClaimedTask(
+        claimed,
+        {
+          store,
+          presence,
+          config,
+        },
+        taskController.signal,
+      )
+        .catch((err) => {
+          console.error(`[worker] chat_step execution error:`, err?.message || String(err))
+        })
+        .finally(() => {
+          shutdownController.signal.removeEventListener('abort', onShutdown)
+          if (activeChatTask?.taskId === taskId) {
+            activeChatTask = null
+          }
+        })
+
+      activeChatTask = {
+        taskId,
+        featureId: claimed.featureId,
+        controller: taskController,
+        promise,
+      }
+      return
+    }
+
     if (ctrl.action.startsWith('query:') || ctrl.action.startsWith('query_')) {
       const queryId = ctrl.queryId
       const command = ctrl.command || config.providerCommand || 'openrouter-agent'
@@ -339,9 +394,6 @@ async function runDaemon(): Promise<void> {
           if (action === 'query:models') {
             const models = await probeModels(command)
             await client.sendQueryResponse(queryId, models)
-          } else if (action === 'query:quota') {
-            const quota = await probeQuota(command)
-            await client.sendQueryResponse(queryId, quota)
           } else if (action === 'query:capabilities') {
             const caps = await probeCapabilities(command)
             await client.sendQueryResponse(queryId, caps)
@@ -567,6 +619,16 @@ async function runDaemon(): Promise<void> {
           stoppedCount++
         }
       }
+      if (activeChatTask) {
+        const matchesTask = targetTaskId ? (activeChatTask.taskId === targetTaskId) : true
+        const matchesFeature = targetFeature ? (activeChatTask.featureId === targetFeature) : true
+        if (matchesTask && matchesFeature) {
+          console.log(`[worker] aborting active chat task "${activeChatTask.taskId}"`)
+          activeChatTask.controller.abort()
+          stoppedCount++
+        }
+      }
+
       if (stoppedCount === 0) {
         console.log(`[worker] stop signal received but no active tasks matched`)
       }
@@ -593,11 +655,14 @@ async function runDaemon(): Promise<void> {
 
     shutdownController.abort()
 
-    if (activeTasks.size > 0) {
-      console.log(`[worker] waiting for ${activeTasks.size} active task(s) to finalize...`)
-      const promises = Array.from(activeTasks.values()).map((t) => t.promise)
+    const allActivePromises = Array.from(activeTasks.values()).map((t) => t.promise)
+    if (activeChatTask) {
+      allActivePromises.push(activeChatTask.promise)
+    }
+    if (allActivePromises.length > 0) {
+      console.log(`[worker] waiting for ${allActivePromises.length} active task(s) to finalize...`)
       const cap = new Promise((resolve) => setTimeout(resolve, SHUTDOWN_FINALIZE_CAP_MS))
-      await Promise.race([Promise.all(promises), cap]).catch(() => {})
+      await Promise.race([Promise.all(allActivePromises), cap]).catch(() => {})
     }
 
     await presence.stop().catch(() => {})

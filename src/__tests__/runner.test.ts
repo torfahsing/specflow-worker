@@ -144,13 +144,15 @@ function makeStubProvider(
     for (const e of events) {
       await onEvent(e)
     }
+    const textEvents = events.filter((e) => e.type === 'text')
+    const accumulatedText = textEvents.map((e) => (e.payload as any)?.content ?? '').join('')
     return {
       exitCode: 0,
       signalCode: null,
       cancelled: false,
       timedOut: false,
       stream: {
-        resultText: '',
+        resultText: accumulatedText || 'Task output generated successfully.',
         tokens: null,
         cost: null,
         ...stream,
@@ -214,7 +216,7 @@ function makeCancelledProvider(): typeof import('../providers/cli.js').runProvid
 // ===========================================================================
 
 describe('executeClaimedTask — success', () => {
-  it('emits events in order with correct types and payloads', async () => {
+  it('emits events in order with correct types and payloads, filtering out tool events', async () => {
     const store = makeMemoryStore()
     const presence = new StubPresence()
     const events: ProviderEvent[] = [
@@ -234,17 +236,15 @@ describe('executeClaimedTask — success', () => {
     expect(outcome.status).toBe('done')
     expect(outcome.runId).toBeTruthy()
 
-    // Verify event order and types
+    // Verify event order and types (tool_call and tool_result are filtered out)
     const recordedEvents = store.events
-    expect(recordedEvents).toHaveLength(4)
+    expect(recordedEvents).toHaveLength(2)
     expect(recordedEvents[0]!.type).toBe('text')
     expect(recordedEvents[1]!.type).toBe('reasoning')
-    expect(recordedEvents[2]!.type).toBe('tool_call')
-    expect(recordedEvents[3]!.type).toBe('tool_result')
 
     // Verify payload shapes match spec §4.3
     expect(recordedEvents[0]!.payload).toEqual({ content: 'Hello' })
-    expect(recordedEvents[2]!.payload).toEqual({ name: 'file_read', call_id: 'c1', args: { path: '/dev/null' } })
+    expect(recordedEvents[1]!.payload).toEqual({ content: 'thinking' })
   })
 
   it('sequences are exactly 1..N in call order', async () => {
@@ -293,7 +293,7 @@ describe('executeClaimedTask — success', () => {
     // task patch should be done
     const taskPatches = store.taskPatches
     expect(taskPatches).toHaveLength(1)
-    expect(taskPatches[0]!.patch).toEqual({ status: 'done' })
+    expect(taskPatches[0]!.patch).toMatchObject({ status: 'done' })
   })
 
   it('accumulates tokens and cost from done events', async () => {
@@ -340,7 +340,7 @@ describe('executeClaimedTask — success', () => {
     // MemoryWorkerStore records patches in order, so we can verify.
     const taskPatches = store.taskPatches
     expect(taskPatches).toHaveLength(1)
-    expect(taskPatches[0]!.patch).toEqual({ status: 'done' })
+    expect(taskPatches[0]!.patch).toMatchObject({ status: 'done' })
   })
 })
 
@@ -839,7 +839,7 @@ describe('executeClaimedTask — finalize matrix', () => {
     expect(runs[0]!.error).toBeUndefined()
 
     const taskPatches = store.taskPatches
-    expect(taskPatches[0]!.patch).toEqual({ status: 'done' })
+    expect(taskPatches[0]!.patch).toMatchObject({ status: 'done' })
   })
 
   it('error path: runs failed + tasks failed with error', async () => {
@@ -932,3 +932,82 @@ describe('executeClaimedTask — log prefixes', () => {
     expect(runnerLog).toContain('timeout=30s')
   })
 })
+
+// ===========================================================================
+// Mandatory output contract enforcement
+// ===========================================================================
+
+describe('executeClaimedTask — mandatory output contract', () => {
+  it('fails with actionable error when output is empty string', async () => {
+    const store = makeMemoryStore()
+    const presence = new StubPresence()
+    const provider = makeStubProvider([], { resultText: '   ' })
+    const deps = makeDeps({ store, presence, provider })
+
+    const task = makeClaimedTask()
+    const signal = new AbortController().signal
+
+    const outcome = await executeClaimedTask(task as ClaimedTask, deps, signal)
+
+    expect(outcome.status).toBe('failed')
+    expect(outcome.error).toBe('Task "task_1" completed with empty output.')
+
+    const runs = Array.from(store.runs.values())
+    expect(runs[0]!.status).toBe('failed')
+    expect(runs[0]!.error).toBe('Task "task_1" completed with empty output.')
+  })
+})
+
+// ===========================================================================
+// Sidecar Colleague Chat isolation
+// ===========================================================================
+
+describe('executeClaimedTask — sidecar chat isolation', () => {
+  it('executes chat task (isChat: true) without git branch checkout, git commit, or altering presence', async () => {
+    const store = makeMemoryStore()
+    const presence = new StubPresence()
+    let checkoutCalled = false
+    let commitCalled = false
+
+    const git = {
+      getCurrentBranch: async () => 'main',
+      branchExists: async () => true,
+      createBranch: async () => {},
+      checkoutBranch: async () => { checkoutCalled = true },
+      commitChanges: async () => { commitCalled = true },
+      discardWorkingChanges: async () => {},
+      getDefaultBranch: async () => 'main',
+    } as any
+
+    const provider = makeStubProvider([
+      { type: 'text', payload: { content: 'Chat response' } },
+    ])
+    const deps = makeDeps({ store, presence, provider, git })
+
+    const task = makeClaimedTask({
+      role: 'colleague',
+      task_type: 'chat_step',
+      allowed_tools: ['file_read'],
+      expand: {
+        feature: {
+          id: 'feat_1',
+          project_dir: '/tmp/project',
+          git_branch: 'feature/some-branch',
+        },
+      },
+    })
+    task.isChat = true
+
+    const signal = new AbortController().signal
+    const outcome = await executeClaimedTask(task as ClaimedTask, deps, signal)
+
+    expect(outcome.status).toBe('done')
+    expect(outcome.output).toBe('Chat response')
+    // Git branch checkout and commit MUST NOT be called for chat
+    expect(checkoutCalled).toBe(false)
+    expect(commitCalled).toBe(false)
+    // Presence setBusy MUST NOT be called for sidecar chat
+    expect(presence.busyCalls).toHaveLength(0)
+  })
+})
+

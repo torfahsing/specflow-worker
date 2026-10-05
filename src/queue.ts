@@ -11,6 +11,7 @@ export interface ClaimedTask {
   featureId: string
   record: any
   runId?: string
+  isChat?: boolean
 }
 
 export async function subscribeToControl(

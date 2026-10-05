@@ -37,27 +37,15 @@ export interface DiscoveredCapabilities {
   supportedModels: string[]
   features: {
     models?: boolean
-    quota?: boolean
     sessions?: boolean
     structuredOutput?: boolean
   }
-}
-
-export interface DiscoveredQuota {
-  models?: Array<{
-    name: string
-    quota_remaining: number
-    quota_limit: number
-    remaining_fraction: number
-    reset_time: string
-  }>
 }
 
 export interface LocalWorkerManifest {
   git: boolean
   capabilities: DiscoveredCapabilities | null
   models: DiscoveredModel[]
-  quota: DiscoveredQuota | null
 }
 
 /**
@@ -123,38 +111,7 @@ export async function probeModels(
 }
 
 /**
- * Probe a CLI provider for quota and usage limits (--quota).
- */
-export async function probeQuota(
-  command: string,
-  timeoutMs = 5000,
-): Promise<DiscoveredQuota | null> {
-  try {
-    const proc = Bun.spawn([command, '--quota'], {
-      stdout: 'pipe',
-      stderr: 'pipe',
-    })
-
-    const timeout = new Promise<null>((resolve) => setTimeout(() => resolve(null), timeoutMs))
-    const readOutput = async (): Promise<DiscoveredQuota | null> => {
-      const exitCode = await proc.exited
-      if (exitCode !== 0) return null
-      const text = await new Response(proc.stdout).text()
-      const parsed = JSON.parse(text)
-      if (parsed && (Array.isArray(parsed.models) || typeof parsed === 'object')) {
-        return parsed as DiscoveredQuota
-      }
-      return null
-    }
-
-    return await Promise.race([readOutput(), timeout])
-  } catch {
-    return null
-  }
-}
-
-/**
- * Collect the full local worker manifest (git support, capabilities, live models, quota).
+ * Collect the full local worker manifest (git support, capabilities, live models).
  */
 export async function discoverLocalManifest(
   defaultProviderCommand?: string,
@@ -175,20 +132,17 @@ export async function discoverLocalManifest(
       git: gitAvailable,
       capabilities: null,
       models: [],
-      quota: null,
     }
   }
 
-  const [capabilities, models, quota] = await Promise.all([
+  const [capabilities, models] = await Promise.all([
     probeCapabilities(resolved),
     probeModels(resolved),
-    probeQuota(resolved),
   ])
 
   return {
     git: gitAvailable,
     capabilities,
     models,
-    quota,
   }
 }

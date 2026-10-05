@@ -2,7 +2,6 @@ import { describe, it, expect } from 'bun:test'
 import {
   probeCapabilities,
   probeModels,
-  probeQuota,
   discoverLocalManifest,
 } from '../discovery'
 

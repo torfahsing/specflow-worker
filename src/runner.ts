@@ -77,10 +77,14 @@ export async function executeClaimedTask(
   const featureId = claimed.featureId
   const record = claimed.record
   const feature = record.expand?.feature ?? {}
+  const taskType = ((record.type || record.task_type || '') as string).toLowerCase()
+  const isChat = Boolean(claimed.isChat || taskType === 'chat_step')
 
-  // Step 1: start the run recorder + set presence busy
+  // Step 1: start the run recorder + set presence busy (chat does not alter workflow busy state)
   const recorder = await RunRecorder.start(store, { taskId, featureId, runId: claimed.runId })
-  presence.setBusy(true)
+  if (!isChat) {
+    presence.setBusy(true)
+  }
 
   // Step 2: resolve execution inputs
   let prompt = record.prompt as string | undefined
@@ -96,11 +100,10 @@ export async function executeClaimedTask(
 
   // Step 3: pre-run input failures
   const roleName = ((record.role || record.agent || '') as string).toLowerCase()
-  const taskType = ((record.type || record.task_type || '') as string).toLowerCase()
   const EXCLUDED_ROLES = new Set(['colleague', 'chat', 'colleague_chat', 'colleague-chat'])
   const EXCLUDED_TYPES = new Set(['chat', 'colleague_chat', 'colleague-chat', 'conversation'])
 
-  if (EXCLUDED_ROLES.has(roleName) || EXCLUDED_TYPES.has(taskType)) {
+  if (!isChat && (EXCLUDED_ROLES.has(roleName) || EXCLUDED_TYPES.has(taskType))) {
     const error = `Colleague chat tasks are handled by orchestrator, not worker (task "${taskId}").`
     await recorder.finalize({ status: 'failed', error })
     await store.updateTask(taskId, { status: 'failed', error })
@@ -112,7 +115,7 @@ export async function executeClaimedTask(
     const error = `Task "${taskId}" has no "prompt" — prompt assembly happens upstream before queueing.`
     await recorder.finalize({ status: 'failed', error })
     await store.updateTask(taskId, { status: 'failed', error })
-    presence.setBusy(false)
+    if (!isChat) presence.setBusy(false)
     return { status: 'failed', runId: recorder.runId, error }
   }
 
@@ -120,7 +123,7 @@ export async function executeClaimedTask(
     const error = `Task "${taskId}" has no "provider_command".`
     await recorder.finalize({ status: 'failed', error })
     await store.updateTask(taskId, { status: 'failed', error })
-    presence.setBusy(false)
+    if (!isChat) presence.setBusy(false)
     return { status: 'failed', runId: recorder.runId, error }
   }
 
@@ -130,12 +133,12 @@ export async function executeClaimedTask(
       : `Task "${taskId}" has no "project_dir".`
     await recorder.finalize({ status: 'failed', error })
     await store.updateTask(taskId, { status: 'failed', error })
-    presence.setBusy(false)
+    if (!isChat) presence.setBusy(false)
     return { status: 'failed', runId: recorder.runId, error }
   }
 
-  // Step 4: branch alignment
-  if (branch) {
+  // Step 4: branch alignment (bypassed for sidecar chat tasks)
+  if (branch && !isChat) {
     try {
       const current = await gitModule.getCurrentBranch(cwd)
       if (current !== branch) {
@@ -158,7 +161,7 @@ export async function executeClaimedTask(
       return { status: 'failed', runId: recorder.runId, error }
     }
   } else {
-    console.log(`[git] skipping branch alignment (no branch specified)`)
+    console.log(`[git] skipping branch alignment (${isChat ? 'chat task' : 'no branch specified'})`)
   }
 
   // Context protection: check for bounded diff if review task or requested
@@ -215,6 +218,9 @@ export async function executeClaimedTask(
           outputSchemaPath: stagedSchemaPath,
         },
         async (e: ProviderEvent) => {
+          if (e.type === 'tool_call' || e.type === 'tool_result') {
+            return // drop tool events from SSE/HTTP streaming
+          }
           await recorder.emit(e.type, e.payload)
         },
       )
@@ -223,7 +229,7 @@ export async function executeClaimedTask(
       if (result.cancelled) break  // aborted — don't try next model
       if (i < modelsToTry.length - 1) {
         console.log(`[runner] model "${model}" failed, trying next model...`)
-        if (cwd && gitModule.discardWorkingChanges) {
+        if (!isChat && cwd && gitModule.discardWorkingChanges) {
           console.log(`[runner] discarding dirty changes before retry with next model`)
           await gitModule.discardWorkingChanges(cwd)
         }
@@ -232,7 +238,7 @@ export async function executeClaimedTask(
       lastError = (err as Error).message
       if (i < modelsToTry.length - 1) {
         console.log(`[runner] model "${model}" threw error: ${lastError}, trying next model...`)
-        if (cwd && gitModule.discardWorkingChanges) {
+        if (!isChat && cwd && gitModule.discardWorkingChanges) {
           console.log(`[runner] discarding dirty changes before retry with next model`)
           await gitModule.discardWorkingChanges(cwd)
         }
@@ -242,14 +248,14 @@ export async function executeClaimedTask(
 
   if (!result) {
     if (stagedSchemaPath) await rm(stagedSchemaPath, { force: true }).catch(() => {})
-    if (cwd && gitModule.discardWorkingChanges) {
+    if (!isChat && cwd && gitModule.discardWorkingChanges) {
       console.log(`[runner] discarding dirty changes after failed task "${taskId}"`)
       await gitModule.discardWorkingChanges(cwd)
     }
     const error = lastError ?? 'All models failed'
     await recorder.finalize({ status: 'failed', error })
     await store.updateTask(taskId, { status: 'failed', error })
-    presence.setBusy(false)
+    if (!isChat) presence.setBusy(false)
     effectiveSignal?.removeEventListener('abort', abortListener)
     return { status: 'failed', runId: recorder.runId, error }
   }
@@ -259,7 +265,7 @@ export async function executeClaimedTask(
     if (stagedSchemaPath) {
       await rm(stagedSchemaPath, { force: true }).catch(() => {})
     }
-    if (cwd && gitModule.discardWorkingChanges) {
+    if (!isChat && cwd && gitModule.discardWorkingChanges) {
       console.log(`[runner] discarding dirty changes after cancelled task "${taskId}"`)
       await gitModule.discardWorkingChanges(cwd)
     }
@@ -274,7 +280,7 @@ export async function executeClaimedTask(
       status: 'queued',
       assigned_worker: null,
     })
-    presence.setBusy(false)
+    if (!isChat) presence.setBusy(false)
     effectiveSignal?.removeEventListener('abort', abortListener)
     return { status: 'cancelled', runId: recorder.runId }
   }
@@ -338,7 +344,7 @@ export async function executeClaimedTask(
 
   // Step 8: terminal error event for non-cancellation failures
   if (result.error) {
-    if (cwd && gitModule.discardWorkingChanges) {
+    if (!isChat && cwd && gitModule.discardWorkingChanges) {
       console.log(`[runner] discarding dirty changes after failed task "${taskId}"`)
       await gitModule.discardWorkingChanges(cwd)
     }
@@ -349,14 +355,14 @@ export async function executeClaimedTask(
     })
     await recorder.finalize({ status: 'failed', error: result.error })
     await store.updateTask(taskId, { status: 'failed', error: result.error })
-    presence.setBusy(false)
+    if (!isChat) presence.setBusy(false)
     effectiveSignal?.removeEventListener('abort', abortListener)
     return { status: 'failed', runId: recorder.runId, error: result.error }
   }
 
   // Clean success path - only commit if task is an implementation/feature task with a branch or write tools
   const canModifyFiles = allowedTools.some(t => ['file_write', 'file_edit', 'shell'].includes(t))
-  if (cwd && branch && canModifyFiles && gitModule.commitChanges) {
+  if (!isChat && cwd && branch && canModifyFiles && gitModule.commitChanges) {
     const displayTaskId = (record.task_id || taskId) as string
     const title = (record.title || displayTaskId) as string
     try {
@@ -369,9 +375,25 @@ export async function executeClaimedTask(
 
   const tokens = result.stream.tokens
   const costUsd = result.stream.cost
-  const taskOutput = parsedStructuredOutput !== undefined
+  const rawOutput = parsedStructuredOutput !== undefined
     ? parsedStructuredOutput
     : (result.stream.resultText || undefined)
+
+  // Mandatory output contract: completed tasks must produce non-empty output
+  const hasOutput = rawOutput !== undefined &&
+    rawOutput !== null &&
+    (typeof rawOutput !== 'string' || rawOutput.trim() !== '')
+
+  if (!hasOutput) {
+    const error = `Task "${taskId}" completed with empty output.`
+    await recorder.finalize({ status: 'failed', error })
+    await store.updateTask(taskId, { status: 'failed', error })
+    if (!isChat) presence.setBusy(false)
+    effectiveSignal?.removeEventListener('abort', abortListener)
+    return { status: 'failed', runId: recorder.runId, error }
+  }
+
+  const taskOutput = rawOutput
 
   await recorder.finalize({
     status: 'completed',
@@ -386,7 +408,7 @@ export async function executeClaimedTask(
     status: 'done',
     output: taskOutput,
   })
-  presence.setBusy(false)
+  if (!isChat) presence.setBusy(false)
   effectiveSignal?.removeEventListener('abort', abortListener)
 
   return {
