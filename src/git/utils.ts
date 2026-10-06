@@ -275,8 +275,9 @@ export async function getFileDiff(dir: string, filepath: string, branch: string)
     const out = await Bun.$`git -C ${dir} log --oneline main..${branch}`.text()
     const uniqueCommits = out.trim().split('\n').filter(Boolean)
     if (uniqueCommits.length > 0) {
-      const oldest = uniqueCommits[uniqueCommits.length - 1].split(' ')[0]
-      baseRef = `${oldest}~1`
+      const last = uniqueCommits[uniqueCommits.length - 1]
+      const oldest = last ? last.split(' ')[0] : undefined
+      if (oldest) baseRef = `${oldest}~1`
     }
   } catch {
     // use branch~1

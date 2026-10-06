@@ -132,6 +132,54 @@ describe('HttpWorkerStore — HTTP API delegation', () => {
     expect(calls.finishTask).toBe(1)
     expect(finishedPayloads[0].output).toBe('hello world')
   })
+
+  it('isolates events and finishes between concurrent runs without crosstalk', async () => {
+    const { client, sentEvents, finishedPayloads } = makeStubClient()
+    const store = new HttpWorkerStore(client)
+
+    // Two tasks run concurrently
+    const run1 = await store.createRun({ taskId: 'task_feature_spec', featureId: 'feat_spec' })
+    const run2 = await store.createRun({ taskId: 'task_chat_step', featureId: 'feat_chat' })
+
+    // Task 1 emits spec events
+    await store.emitRunEvent(run1, 1, 'text', { content: 'Specifying selector-width' })
+
+    // Task 2 emits chat events
+    await store.emitRunEvent(run2, 1, 'reasoning', { thought: 'Researching menu floor' })
+    await store.emitRunEvent(run2, 2, 'text', { content: 'Menu floor research findings' })
+
+    // Task 1 emits another spec event
+    await store.emitRunEvent(run1, 2, 'text', { content: 'Additional spec content' })
+
+    // Finish task 2 (chat)
+    await store.updateRun(run2, { status: 'completed', output: 'Chat output' })
+
+    // Task 2 finish must be for task_chat_step, NOT task_feature_spec
+    expect(finishedPayloads).toHaveLength(1)
+    expect(finishedPayloads[0].taskId).toBe('task_chat_step')
+    expect(finishedPayloads[0].output).toBe('Chat output')
+
+    // Finish task 1 (spec)
+    await store.updateRun(run1, { status: 'completed', output: 'Spec output' })
+
+    expect(finishedPayloads).toHaveLength(2)
+    expect(finishedPayloads[1].taskId).toBe('task_feature_spec')
+    expect(finishedPayloads[1].output).toBe('Spec output')
+
+    // Events for task_feature_spec must ONLY contain spec events
+    const specEventsBatch = sentEvents.filter((s: any) => s.taskId === 'task_feature_spec')
+    const allSpecPayloads = specEventsBatch.flatMap((s: any) => s.events.map((e: any) => e.payload.content))
+    expect(allSpecPayloads).toContain('Specifying selector-width')
+    expect(allSpecPayloads).toContain('Additional spec content')
+    expect(allSpecPayloads).not.toContain('Menu floor research findings')
+
+    // Events for task_chat_step must ONLY contain chat events
+    const chatEventsBatch = sentEvents.filter((s: any) => s.taskId === 'task_chat_step')
+    const allChatPayloads = chatEventsBatch.flatMap((s: any) => s.events.map((e: any) => e.payload.content || e.payload.thought))
+    expect(allChatPayloads).toContain('Researching menu floor')
+    expect(allChatPayloads).toContain('Menu floor research findings')
+    expect(allChatPayloads).not.toContain('Specifying selector-width')
+  })
 })
 
 // ---------------------------------------------------------------------------

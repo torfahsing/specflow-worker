@@ -18,6 +18,7 @@ export interface WorkerConfig {
   envValues: Record<string, string>
   workerEnvPath: string
   concurrency?: number
+  providerCommand?: string
 }
 
 const DEFAULT_SPECFLOW_URL = 'http://127.0.0.1:3200'

@@ -44,7 +44,7 @@ async function tryAutoProvisionLocalToken(baseUrl: string, workerName: string): 
       signal: AbortSignal.timeout(3000),
     })
     if (res.ok) {
-      const data = await res.json()
+      const data = (await res.json()) as any
       if (data?.token && typeof data.token === 'string') {
         return data.token
       }
@@ -96,7 +96,7 @@ async function handleConnect(args: string[]): Promise<void> {
       url = args[++i] || ''
     } else if (arg === '--start') {
       startAfter = true
-    } else if (!arg.startsWith('-') && !url) {
+    } else if (arg && !arg.startsWith('-') && !url) {
       url = arg
     }
   }
@@ -607,6 +607,11 @@ async function runDaemon(): Promise<void> {
       const targetTaskId = ctrl.taskId || ctrl.task_id
       const targetFeature = ctrl.feature
       console.log(`[worker] received control stop: taskId=${targetTaskId || '*'} feature=${targetFeature || '*'}`)
+
+      if (!targetTaskId && !targetFeature && !ctrl.all) {
+        console.warn(`[worker] stop command ignored: neither taskId nor feature specified`)
+        return
+      }
 
       let stoppedCount = 0
       for (const [id, taskInfo] of activeTasks.entries()) {

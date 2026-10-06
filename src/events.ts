@@ -43,7 +43,7 @@ export class RunRecorder {
   ): Promise<RunRecorder> {
     if (input.runId) {
       if ((store as any).setActiveTask) {
-        (store as any).setActiveTask(input.taskId)
+        (store as any).setActiveTask(input.taskId, input.runId)
       }
       return new RunRecorder(input.runId, store)
     }

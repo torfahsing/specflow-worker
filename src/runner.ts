@@ -306,7 +306,7 @@ export async function executeClaimedTask(
           const repairResult = await runProviderFn(
             {
               command,
-              model: result.model ?? modelsToTry[modelsToTry.length - 1],
+              model: (result as any).model ?? modelsToTry[modelsToTry.length - 1],
               allowedTools: [],
               prompt: repairPrompt,
               cwd,

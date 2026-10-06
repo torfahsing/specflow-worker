@@ -60,69 +60,101 @@ export interface WorkerStore {
 // HttpWorkerStore (Specflow API HTTP/SSE)
 // ---------------------------------------------------------------------------
 
+interface RunStreamState {
+  taskId: string
+  runId: string
+  eventBuffer: WorkerEventItem[]
+  flushTimer: ReturnType<typeof setTimeout> | null
+  pendingFlush: Promise<void>
+}
+
 export class HttpWorkerStore implements WorkerStore {
-  private activeTaskId = ''
-  private activeRunId: string | null = null
-  private eventBuffer: WorkerEventItem[] = []
-  private flushTimer: ReturnType<typeof setTimeout> | null = null
-  private pendingFlush: Promise<void> = Promise.resolve()
+  private runs = new Map<string, RunStreamState>()
+  private defaultTaskId = ''
 
   constructor(private client: SpecflowClient) {}
 
-  setActiveTask(taskId: string): void {
-    this.activeTaskId = taskId
+  setActiveTask(taskId: string, runId?: string): void {
+    this.defaultTaskId = taskId
+    if (runId) {
+      this.ensureRunState(taskId, runId)
+    }
+  }
+
+  private ensureRunState(taskId: string, runId: string): RunStreamState {
+    let state = this.runs.get(runId)
+    if (!state) {
+      state = {
+        taskId,
+        runId,
+        eventBuffer: [],
+        flushTimer: null,
+        pendingFlush: Promise.resolve(),
+      }
+      this.runs.set(runId, state)
+    } else if (taskId && !state.taskId) {
+      state.taskId = taskId
+    }
+    return state
   }
 
   async createRun(input: { taskId: string; featureId: string }): Promise<string> {
-    this.activeTaskId = input.taskId
+    this.defaultTaskId = input.taskId
     const runId = `run_${input.taskId}`
-    this.activeRunId = runId
+    this.ensureRunState(input.taskId, runId)
     return runId
   }
 
-  private async flushEvents(): Promise<void> {
-    if (this.flushTimer) {
-      clearTimeout(this.flushTimer)
-      this.flushTimer = null
+  private async flushEvents(state: RunStreamState): Promise<void> {
+    if (state.flushTimer) {
+      clearTimeout(state.flushTimer)
+      state.flushTimer = null
     }
 
-    if (this.eventBuffer.length === 0 || !this.activeTaskId || !this.activeRunId) {
+    if (state.eventBuffer.length === 0 || !state.taskId || !state.runId) {
       return
     }
 
-    const batch = [...this.eventBuffer]
-    this.eventBuffer = []
-    const taskId = this.activeTaskId
-    const runId = this.activeRunId
+    const batch = [...state.eventBuffer]
+    state.eventBuffer = []
+    const taskId = state.taskId
+    const runId = state.runId
 
-    this.pendingFlush = this.pendingFlush
+    state.pendingFlush = state.pendingFlush
       .then(async () => {
         await this.client.sendEvents(taskId, runId, batch)
       })
       .catch((err) => {
-        console.warn('[store] sendEvents notice:', err?.message || String(err))
+        console.warn(`[store] sendEvents notice for task "${taskId}":`, err?.message || String(err))
       })
 
-    await this.pendingFlush
+    await state.pendingFlush
   }
 
   async updateRun(runId: string, patch: Partial<RunRecord>): Promise<void> {
-    this.activeRunId = runId
-    await this.flushEvents()
-    await this.pendingFlush
+    const state = this.runs.get(runId)
+    const taskId = state?.taskId || this.defaultTaskId
+
+    if (state) {
+      await this.flushEvents(state)
+      await state.pendingFlush
+      this.runs.delete(runId)
+    }
 
     const status = patch.status === 'completed' ? 'completed' : 'failed'
-    await this.client.finishTask(this.activeTaskId, {
-      run_id: runId,
-      status,
-      output: patch.output,
-      error: patch.error,
-      input_tokens: patch.inputTokens ?? (patch as any).input_tokens,
-      output_tokens: patch.outputTokens ?? (patch as any).output_tokens,
-      cost_usd: patch.costUsd ?? (patch as any).cost_usd,
-    }).catch((err) => {
-      console.warn('[store] finishTask notice:', err?.message || String(err))
-    })
+    if (taskId) {
+      await this.client.finishTask(taskId, {
+        run_id: runId,
+        status,
+        output: patch.output,
+        error: patch.error,
+        input_tokens: patch.inputTokens ?? (patch as any).input_tokens,
+        output_tokens: patch.outputTokens ?? (patch as any).output_tokens,
+        cost_usd: patch.costUsd ?? (patch as any).cost_usd,
+      }).catch((err) => {
+        console.warn(`[store] finishTask notice for task "${taskId}":`, err?.message || String(err))
+      })
+    }
   }
 
   async emitRunEvent(
@@ -136,20 +168,25 @@ export class HttpWorkerStore implements WorkerStore {
       return
     }
 
-    this.activeRunId = runId
-    this.eventBuffer.push({ sequence, type, payload })
+    let state = this.runs.get(runId)
+    if (!state) {
+      const inferredTaskId = runId.startsWith('run_') ? runId.slice(4) : this.defaultTaskId
+      state = this.ensureRunState(inferredTaskId, runId)
+    }
+
+    state.eventBuffer.push({ sequence, type, payload })
 
     // High-priority events flush immediately; text and reasoning batch up with 75ms debounce
     if (
-      this.eventBuffer.length >= 15 ||
+      state.eventBuffer.length >= 15 ||
       type === 'tool_call' ||
       type === 'tool_result' ||
       type === 'error'
     ) {
-      await this.flushEvents()
-    } else if (!this.flushTimer) {
-      this.flushTimer = setTimeout(() => {
-        this.flushEvents().catch((err) => {
+      await this.flushEvents(state)
+    } else if (!state.flushTimer) {
+      state.flushTimer = setTimeout(() => {
+        this.flushEvents(state).catch((err) => {
           console.warn('[store] flushEvents notice:', err?.message || String(err))
         })
       }, 75)
