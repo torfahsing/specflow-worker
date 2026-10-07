@@ -138,6 +138,7 @@ async function collectSnippetPaths(root: string, maxSnippets: number): Promise<s
         const relPath = relative ? `${relative}/${entry.name}` : entry.name
         if (entry.isDirectory()) {
           await walk(path.join(currentDir, entry.name), relPath)
+          if (paths.length >= maxSnippets) return
         } else if (SOURCE_EXTENSIONS.has(path.extname(entry.name).toLowerCase())) {
           paths.push(relPath)
           if (paths.length >= maxSnippets) return
