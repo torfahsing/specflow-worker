@@ -30,9 +30,6 @@ report.[0-9]_.[0-9]_.[0-9]_.[0-9]_.json
 .cache
 *.tsbuildinfo
 
-# agent orchestration state (review/test tool-result transcripts; never part of a feature diff)
-.agent-state/
-
 # IntelliJ based IDEs
 .idea
 
