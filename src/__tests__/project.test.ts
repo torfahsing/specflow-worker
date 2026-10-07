@@ -860,19 +860,30 @@ describe('project/inspectCodebase', () => {
 
     it('CHARACTERIZATION: walk order is localeCompare collation, not codepoint order', async () => {
       const dir = path.join(testDir, 'collation')
+      // Mixed case on purpose: uppercase-vs-lowercase placement is exactly what
+      // differs between ICU collation and codepoint order. No two names tie at
+      // the collation primary level ('a' < 't' < 't' < 'z', with 'h' < 'w' for
+      // three/two), so the sort is never ambiguous on any host.
+      const names = ['two.ts', 'three.ts', 'Zeta.ts', 'alpha.ts']
       await mkdir(dir, { recursive: true })
-      for (const name of ['two.ts', 'three.ts', 'Zeta.ts', 'alpha.ts']) {
+      for (const name of names) {
         await writeFile(path.join(dir, name), 'export const v = 1\n', 'utf8')
       }
 
       const result = await inspectCodebase({ dir, maxSnippets: 50 })
 
-      // ICU collation compares case-insensitively at the primary level, so
-      // "alpha" < "three" < "two" < "Zeta" — notably "three" sorts BEFORE "two",
-      // which is not codepoint order. Which files win the maxSnippets budget
-      // therefore depends on the daemon's collation (fs:get_tree has the same
-      // posture), so a cross-machine byte-identical briefing is not guaranteed.
-      expect(pathsOf(result.snippets)).toEqual(['alpha.ts', 'three.ts', 'two.ts', 'Zeta.ts'])
+      // The walk sorts entries with `a.name.localeCompare(b.name)` (the
+      // fs:get_tree posture). ICU collation compares case-insensitively at the
+      // primary level, so on typical ICU hosts the order is "alpha" < "three" <
+      // "two" < "Zeta" — notably "three" sorts BEFORE "two", which is not
+      // codepoint order. But ICU collation and uppercase-vs-lowercase placement
+      // vary across platforms/Bun versions (C/POSIX-ish hosts sort 'Zeta' before
+      // 'alpha'), so a hard-coded order would fail on those hosts. The expected
+      // order is therefore computed at runtime with the SAME comparator the walk
+      // uses: the pin is that snippets follow localeCompare, whatever this
+      // host's collation resolves to.
+      const expected = [...names].sort((a, b) => a.localeCompare(b))
+      expect(pathsOf(result.snippets)).toEqual(expected)
     })
 
     it('collects no snippets for a negative maxSnippets', async () => {
