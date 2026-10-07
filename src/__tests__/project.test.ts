@@ -32,9 +32,14 @@
  *     under `.agent-state/tool-results/`, and an add-all sweep used to commit them
  *     into the feature diff. Tier 4 pins the `.gitignore` rule that stops that
  *     recurrence, and skips itself when no usable `git` binary is available.
+ *  5. Committed branch-diff scope: the outcome a reviewer actually diffs — the
+ *     branch may only touch the agreed file list and may not track agent-state
+ *     transcripts. Tier 4 proves the rule is *declared*; tier 5 proves the
+ *     already-committed damage was actually removed, which a `.gitignore` edit
+ *     alone cannot do for a tracked path.
  */
 import { describe, it, expect, beforeEach, afterEach, beforeAll, afterAll } from 'bun:test'
-import { mkdtemp, mkdir, rm, writeFile, readFile, chmod, symlink } from 'node:fs/promises'
+import { mkdtemp, mkdir, readdir, rm, writeFile, readFile, chmod, symlink } from 'node:fs/promises'
 import { tmpdir } from 'node:os'
 import path from 'node:path'
 import {
@@ -1555,5 +1560,241 @@ describe('project/agent-state hygiene (.agent-state/ excluded from commits)', ()
     // Untracked (`??`) entries under .agent-state/ are what an add-all sweep
     // would fold into the next commit; ignored files never show up there.
     expect(gitLines(status.stdout).filter((line) => line.startsWith('??'))).toEqual([])
+  })
+})
+
+// ---------------------------------------------------------------------------
+// Tier 5 - committed branch-diff scope.
+//
+// The acceptance criterion is that the branch diff stays confined to the five
+// feature files (spec §6.2) plus the `.gitignore` line the hygiene fix is
+// required to add, and contains no `.agent-state/` review-machinery state. Tier
+// 4 only proves the ignore rule is *declared* — a rule cannot untrack a path
+// that is already committed, and it does not notice a transcript that was
+// force-added. So this tier asserts the committed outcome: HEAD's tracked tree,
+// HEAD's `.gitignore` blob, and the net diff against the merge-base.
+//
+// Read-only git queries against this checkout (no writes, no temp repos, no
+// wall-clock assertions). Every base-dependent check self-skips when git is
+// unusable or no merge-base resolves — a shallow clone, a detached HEAD, or a
+// CI checkout without a main ref must not turn a scope guard into a false fail.
+// ---------------------------------------------------------------------------
+
+/**
+ * The complete set of paths this branch may modify. The five files named by the
+ * feature's diff-scope criterion, plus `.gitignore`, whose change the hygiene fix
+ * explicitly mandates (“add .agent-state/ to .gitignore”).
+ */
+const ALLOWED_DIFF_FILES = new Set([
+  '.gitignore',
+  'README.md',
+  'src/__tests__/project.test.ts',
+  'src/cli.ts',
+  'src/git/utils.ts',
+  'src/project.ts',
+])
+
+/** The only files the branch may create. */
+const ALLOWED_ADDED_FILES = new Set(['src/project.ts', 'src/__tests__/project.test.ts'])
+
+/**
+ * Transcripts that leaked into this feature's diff on earlier verification runs,
+ * including the one named in the fix request. None may be tracked at HEAD.
+ * (`.agent-state/` predates this branch in `main`, so only paths introduced by
+ * this branch are the branch's responsibility — asserted that way below.)
+ */
+const FLAGGED_TRANSCRIPTS = [
+  '.agent-state/tool-results/call_3dfbd94b2b3c4b4483e1f311.txt',
+  '.agent-state/tool-results/call_9496ef41a59442569ea0c35f.txt',
+  '.agent-state/tool-results/call_e15bccfcaa844aa8a35e256d.txt',
+  '.agent-state/tool-results/call_fed880e92cb2446982362247.txt',
+]
+
+const AGENT_STATE_PREFIX = '.agent-state/'
+
+/** Candidate base refs, in priority order; overridable for CI checkouts. */
+const BASE_REF_CANDIDATES = ['main', 'origin/main', 'master', 'origin/master']
+
+/** Split git path output verbatim (paths are never padded, so no trimming). */
+function pathLines(output: string): string[] {
+  return output.split('\n').filter((line) => line.length > 0)
+}
+
+/** Commit the branch diverged from, or '' when the checkout has no usable base. */
+async function resolveBaseRef(): Promise<string> {
+  const override = process.env.SPECFLOW_DIFF_BASE
+  const candidates = override ? [override] : BASE_REF_CANDIDATES
+
+  for (const candidate of candidates) {
+    const known = await runGit(['rev-parse', '--verify', '--quiet', `${candidate}^{commit}`], REPO_ROOT)
+    if (known.code !== 0) continue
+
+    const merged = await runGit(['merge-base', candidate, 'HEAD'], REPO_ROOT)
+    const sha = pathLines(merged.stdout)[0]
+    if (merged.code === 0 && sha) return sha
+  }
+  return ''
+}
+
+/** Net branch diff paths vs the base, or null when git refused to answer. */
+async function diffPaths(base: string, extraArgs: string[] = []): Promise<string[] | null> {
+  const res = await runGit(['diff', '--name-only', ...extraArgs, `${base}...HEAD`], REPO_ROOT)
+  return res.code === 0 ? pathLines(res.stdout) : null
+}
+
+/** SHA HEAD resolves to, or '' when the checkout has no commits. */
+async function headSha(): Promise<string> {
+  const res = await runGit(['rev-parse', '--verify', '--quiet', 'HEAD'], REPO_ROOT)
+  return res.code === 0 ? (pathLines(res.stdout)[0] ?? '') : ''
+}
+
+/**
+ * True when there is a branch-vs-base diff worth scoping. A merged/rebased
+ * checkout (base == HEAD, so an empty diff) must skip these guards rather than
+ * fail them.
+ */
+async function hasBranchScope(base: string): Promise<boolean> {
+  if (!base) return false
+  const head = await headSha()
+  return head.length > 0 && head !== base
+}
+
+/** Paths tracked in a ref's tree under `prefix`, or null when git refused. */
+async function trackedPathsAt(ref: string, prefix: string): Promise<string[] | null> {
+  const res = await runGit(['ls-tree', '-r', '--name-only', ref, '--', prefix], REPO_ROOT)
+  return res.code === 0 ? pathLines(res.stdout) : null
+}
+
+describe('project/branch diff scope (no agent-state in the committed diff)', () => {
+  let baseRef = ''
+  let scoped = false
+
+  beforeAll(async () => {
+    baseRef = (await gitIsUsable(REPO_ROOT)) ? await resolveBaseRef() : ''
+    scoped = await hasBranchScope(baseRef)
+  })
+
+  it('keeps the ignore rule in the committed .gitignore blob, not just the working tree', async () => {
+    if (!(await gitIsUsable(REPO_ROOT))) return
+
+    // The criterion says “.agent-state/ must be added to .gitignore”; reading
+    // HEAD's blob (instead of the file on disk) proves it was committed, so an
+    // uncommitted local edit cannot pass this guard.
+    const shown = await runGit(['show', 'HEAD:.gitignore'], REPO_ROOT)
+    if (shown.code === 128) return
+    expect(shown.code).toBe(0)
+
+    const rules = gitLines(shown.stdout).filter((line) => !line.startsWith('#'))
+    // Directory form (rooted or not) — a narrow `call_*.txt` glob would still
+    // let the next differently-named transcript through.
+    expect(rules.some((rule) => rule === `${AGENT_STATE_PREFIX}` || rule === `/${AGENT_STATE_PREFIX}`)).toBe(true)
+    expect(rules).not.toContain(`${AGENT_STATE_PREFIX}*.txt`)
+  })
+
+  it('tracks none of the transcripts that previously leaked into this feature diff', async () => {
+    if (!(await gitIsUsable(REPO_ROOT))) return
+
+    for (const transcript of FLAGGED_TRANSCRIPTS) {
+      const tracked = await trackedPathsAt('HEAD', transcript)
+      if (tracked === null) return
+      // `git rm --cached` leaves the file on disk and ignored; what matters is
+      // that it is out of the committed tree.
+      expect(tracked).toEqual([])
+    }
+  })
+
+  it('adds no .agent-state/ path to the tracked tree that the base did not have', async () => {
+    if (!scoped) return
+
+    const atHead = await trackedPathsAt('HEAD', AGENT_STATE_PREFIX)
+    const atBase = await trackedPathsAt(baseRef, AGENT_STATE_PREFIX)
+    if (atHead === null || atBase === null) return
+
+    // Compared against the base rather than against "zero": this checkout's base
+    // already tracks one transcript, committed by an earlier run before the
+    // ignore rule existed. Purging that residue belongs to the base branch —
+    // doing it here would add an out-of-scope `D` entry and re-break the very
+    // criterion under review. What must never happen is the tracked set *growing*
+    // on this branch, so that is exactly what is asserted.
+    const alreadyThere = new Set(atBase)
+    const introduced = atHead.filter((p) => !alreadyThere.has(p))
+    expect(introduced).toEqual([])
+
+    // Non-vacuity control: nothing may have been dropped either, so HEAD's set
+    // equals the base's — the tolerance is pinned, and cannot quietly widen.
+    expect(atHead.slice().sort()).toEqual(atBase.slice().sort())
+  })
+
+  it('confines the branch diff to the five feature files plus .gitignore', async () => {
+    if (!scoped) return
+
+    const changed = await diffPaths(baseRef)
+    if (changed === null) return
+
+    const outOfScope = changed.filter((p) => !ALLOWED_DIFF_FILES.has(p))
+    expect(outOfScope).toEqual([])
+
+    // Control: the guard is not passing because the diff came back empty.
+    expect(changed).toContain('src/project.ts')
+    expect(changed).toContain('src/cli.ts')
+  })
+
+  it('creates no source or test artifact beyond src/project.ts and project.test.ts', async () => {
+    if (!scoped) return
+
+    const added = await diffPaths(baseRef, ['--diff-filter=A'])
+    if (added === null) return
+
+    // Stray suites (project-dispatch.test.ts, project-edge-cases.test.ts) were a
+    // real scope deviation here; the feature's tests belong in project.test.ts.
+    const stray = added.filter((p) => !ALLOWED_ADDED_FILES.has(p))
+    expect(stray).toEqual([])
+    expect(added.filter((p) => p.startsWith(AGENT_STATE_PREFIX))).toEqual([])
+  })
+
+  it('deletes nothing that the base commit tracked', async () => {
+    if (!scoped) return
+
+    const removed = await diffPaths(baseRef, ['--diff-filter=D'])
+    if (removed === null) return
+
+    // Add-then-delete churn inside a branch nets out to nothing, so a real D
+    // entry means pre-existing tracked content is being cleaned up on this branch
+    // rather than by its own change — out of scope even when the content is as
+    // unwelcome as an agent-state transcript.
+    expect(removed).toEqual([])
+  })
+
+  it('shows transcripts left on disk as ignored, never as addable files', async () => {
+    if (!(await gitIsUsable(REPO_ROOT))) return
+
+    let onDisk: string[] = []
+    try {
+      const dir = path.join(REPO_ROOT, '.agent-state', 'tool-results')
+      const entries = await readdir(dir, { withFileTypes: true })
+      onDisk = entries.filter((e) => e.isFile()).map((e) => `${AGENT_STATE_PREFIX}tool-results/${e.name}`)
+    } catch {
+      // Fresh clone with no review state on disk: nothing to cross-check.
+      return
+    }
+
+    const status = await runGit(
+      ['status', '--porcelain', '--ignored', '--untracked-files=all', '--', AGENT_STATE_PREFIX],
+      REPO_ROOT,
+    )
+    if (status.code === 128) return
+    expect(status.code).toBe(0)
+
+    const lines = pathLines(status.stdout)
+    expect(lines.filter((line) => line.startsWith('??'))).toEqual([])
+
+    // Non-vacuity control: every transcript present on disk and not tracked must
+    // be reported as ignored (`!!`), i.e. the rule is doing the work rather than
+    // the directory simply being empty.
+    const tracked = new Set(pathLines((await runGit(['ls-files', '-c', '--', AGENT_STATE_PREFIX], REPO_ROOT)).stdout))
+    const ignored = lines.filter((line) => line.startsWith('!!')).map((line) => line.slice(3))
+    for (const file of onDisk.filter((f) => !tracked.has(f))) {
+      expect(ignored).toContain(file)
+    }
   })
 })
