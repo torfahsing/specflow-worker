@@ -1,27 +1,17 @@
 /**
  * Persistence seam for the worker daemon.
  *
- * Mirrors the adapter-interface layering of
- * specflow/packages/orchestrator/src/storage/interface.ts
- * (pure interface, no implementation import) with the
- * implementation co-located in this file.
+ * Implements WorkerStore interface backed by Specflow HTTP API via SpecflowClient
+ * (HttpWorkerStore) or in-memory (MemoryWorkerStore) for offline unit testing.
  *
- * `MemoryWorkerStore` is production-importable (not test-only) so
- * `bun test` can exercise the runner without a live PocketBase.
- *
- * `PocketBaseStore` is the only module in the daemon allowed to
- * call `pb.collection('runs' | 'run_events' | 'tasks')`.
- * `presence.ts` / `queue.ts` keep their own transport-level
- * `local_workers` / `tasks` access so task updates are never
- * implemented twice (A14).
+ * The worker daemon has zero direct database coupling: all state synchronization
+ * occurs over HTTP/SSE with the Specflow orchestrator.
  */
 
-import type { SpecflowClient } from './client.js'
-
-type PocketBase = any
+import type { SpecflowClient, WorkerEventItem } from './client.js'
 
 // ---------------------------------------------------------------------------
-// Types (single source of truth for run_event.type select values)
+// Types (single source of truth for run event types)
 // ---------------------------------------------------------------------------
 
 export type RunEventType =
@@ -31,10 +21,6 @@ export type RunEventType =
   | 'tool_result'
   | 'error'
 
-/**
- * Single source of truth for `run_events.type` select values.
- * Must match `pb_migrations/1800000002_runs_run_events.js` exactly.
- */
 export const RUN_EVENT_TYPES: ReadonlySet<string> = new Set([
   'text',
   'reasoning',
@@ -47,6 +33,7 @@ export type RunStatus = 'running' | 'completed' | 'failed' | 'cancelled'
 
 export interface RunRecord {
   status?: RunStatus
+  output?: unknown
   inputTokens?: number
   outputTokens?: number
   costUsd?: number
@@ -54,7 +41,7 @@ export interface RunRecord {
 }
 
 // ---------------------------------------------------------------------------
-// WorkerStore interface (mirrors storage/interface.ts shape)
+// WorkerStore interface
 // ---------------------------------------------------------------------------
 
 export interface WorkerStore {
@@ -70,53 +57,103 @@ export interface WorkerStore {
 }
 
 // ---------------------------------------------------------------------------
-// Helpers
+// HttpWorkerStore (Specflow API HTTP/SSE)
 // ---------------------------------------------------------------------------
 
-/**
- * Strip `undefined` values from a patch object before sending to
- * PocketBase.  PB rejects `undefined` JSON values.
- */
-function stripUndefined(
-  patch: Record<string, unknown>,
-): Record<string, unknown> {
-  const result: Record<string, unknown> = {}
-  for (const [key, value] of Object.entries(patch)) {
-    if (value !== undefined) {
-      result[key] = value
-    }
-  }
-  return result
+interface RunStreamState {
+  taskId: string
+  runId: string
+  eventBuffer: WorkerEventItem[]
+  flushTimer: ReturnType<typeof setTimeout> | null
+  pendingFlush: Promise<void>
 }
 
-// ---------------------------------------------------------------------------
-// PocketBaseStore
-// ---------------------------------------------------------------------------
+export class HttpWorkerStore implements WorkerStore {
+  private runs = new Map<string, RunStreamState>()
+  private defaultTaskId = ''
 
-export class PocketBaseStore implements WorkerStore {
-  constructor(private pb: PocketBase) {}
+  constructor(private client: SpecflowClient) {}
+
+  setActiveTask(taskId: string, runId?: string): void {
+    this.defaultTaskId = taskId
+    if (runId) {
+      this.ensureRunState(taskId, runId)
+    }
+  }
+
+  private ensureRunState(taskId: string, runId: string): RunStreamState {
+    let state = this.runs.get(runId)
+    if (!state) {
+      state = {
+        taskId,
+        runId,
+        eventBuffer: [],
+        flushTimer: null,
+        pendingFlush: Promise.resolve(),
+      }
+      this.runs.set(runId, state)
+    } else if (taskId && !state.taskId) {
+      state.taskId = taskId
+    }
+    return state
+  }
 
   async createRun(input: { taskId: string; featureId: string }): Promise<string> {
-    try {
-      const record = await this.pb.collection('runs').create({
-        task: input.taskId,
-        feature: input.featureId,
-        status: 'running',
-      })
-      return record.id
-    } catch (err) {
-      console.warn('[pb] createRun notice:', (err as Error).message)
-      return ''
+    this.defaultTaskId = input.taskId
+    const runId = `run_${input.taskId}`
+    this.ensureRunState(input.taskId, runId)
+    return runId
+  }
+
+  private async flushEvents(state: RunStreamState): Promise<void> {
+    if (state.flushTimer) {
+      clearTimeout(state.flushTimer)
+      state.flushTimer = null
     }
+
+    if (state.eventBuffer.length === 0 || !state.taskId || !state.runId) {
+      return
+    }
+
+    const batch = [...state.eventBuffer]
+    state.eventBuffer = []
+    const taskId = state.taskId
+    const runId = state.runId
+
+    state.pendingFlush = state.pendingFlush
+      .then(async () => {
+        await this.client.sendEvents(taskId, runId, batch)
+      })
+      .catch((err) => {
+        console.warn(`[store] sendEvents notice for task "${taskId}":`, err?.message || String(err))
+      })
+
+    await state.pendingFlush
   }
 
   async updateRun(runId: string, patch: Partial<RunRecord>): Promise<void> {
-    try {
-      const data = stripUndefined(patch as Record<string, unknown>)
-      if (Object.keys(data).length === 0) return
-      await this.pb.collection('runs').update(runId, data)
-    } catch (err) {
-      console.warn('[pb] updateRun notice:', (err as Error).message)
+    const state = this.runs.get(runId)
+    const taskId = state?.taskId || this.defaultTaskId
+
+    if (state) {
+      await this.flushEvents(state)
+      await state.pendingFlush
+      this.runs.delete(runId)
+    }
+
+    const status = patch.status === 'completed' ? 'completed' : 'failed'
+    if (taskId) {
+      await this.client.finishTask(taskId, {
+        run_id: runId,
+        status,
+        output: patch.output,
+        error: patch.error,
+        input_tokens: patch.inputTokens ?? (patch as any).input_tokens,
+        output_tokens: patch.outputTokens ?? (patch as any).output_tokens,
+        cost_usd: patch.costUsd ?? (patch as any).cost_usd,
+      }).catch((err) => {
+        console.warn(`[store] finishTask notice for task "${taskId}":`, err?.message || String(err))
+      })
     }
   }
 
@@ -127,39 +164,37 @@ export class PocketBaseStore implements WorkerStore {
     payload: unknown,
   ): Promise<void> {
     if (!RUN_EVENT_TYPES.has(type)) {
-      console.warn(`[pb] skipping unsupported run_event type "${type}"`)
+      console.warn(`[store] skipping unsupported run_event type "${type}"`)
       return
     }
-    try {
-      await this.pb.collection('run_events').create({
-        run: runId,
-        sequence,
-        type,
-        payload,
-      })
-    } catch (err) {
-      console.warn('[pb] emitRunEvent notice:', (err as Error).message)
+
+    let state = this.runs.get(runId)
+    if (!state) {
+      const inferredTaskId = runId.startsWith('run_') ? runId.slice(4) : this.defaultTaskId
+      state = this.ensureRunState(inferredTaskId, runId)
+    }
+
+    state.eventBuffer.push({ sequence, type, payload })
+
+    // High-priority events flush immediately; text and reasoning batch up with 75ms debounce
+    if (
+      state.eventBuffer.length >= 15 ||
+      type === 'tool_call' ||
+      type === 'tool_result' ||
+      type === 'error'
+    ) {
+      await this.flushEvents(state)
+    } else if (!state.flushTimer) {
+      state.flushTimer = setTimeout(() => {
+        this.flushEvents(state).catch((err) => {
+          console.warn('[store] flushEvents notice:', err?.message || String(err))
+        })
+      }, 75)
     }
   }
 
-  async updateTask(
-    taskId: string,
-    patch: Record<string, unknown>,
-  ): Promise<void> {
-    const data = stripUndefined(patch)
-    try {
-      await this.pb.collection('tasks').update(taskId, data)
-    } catch (err) {
-      // Retry once before surfacing (spec: "retry once before surfacing").
-      try {
-        await new Promise((resolve) => setTimeout(resolve, 250))
-        await this.pb.collection('tasks').update(taskId, data)
-      } catch (retryErr) {
-        throw new Error(
-          `[pb] failed to update task "${taskId}": ${(retryErr as Error).message}`,
-        )
-      }
-    }
+  async updateTask(_taskId: string, _patch: Record<string, unknown>): Promise<void> {
+    // Task state changes are synced to Specflow via claimTask and finishTask
   }
 }
 
@@ -172,6 +207,7 @@ export interface MemoryRunRecord {
   taskId: string
   featureId: string
   status: RunStatus
+  output?: unknown
   inputTokens: number | undefined
   outputTokens: number | undefined
   costUsd: number | undefined
@@ -203,6 +239,7 @@ export class MemoryWorkerStore implements WorkerStore {
       taskId: input.taskId,
       featureId: input.featureId,
       status: 'running',
+      output: undefined,
       inputTokens: undefined,
       outputTokens: undefined,
       costUsd: undefined,
@@ -215,9 +252,7 @@ export class MemoryWorkerStore implements WorkerStore {
     const run = this.runs.get(runId)
     if (!run) return
     if (patch.status !== undefined) run.status = patch.status
-    // Support both camelCase (RunRecord interface) and snake_case
-    // (PocketBase field naming convention) so tests and the runner
-    // can use either without a conversion layer.
+    if (patch.output !== undefined) run.output = patch.output
     if (patch.inputTokens !== undefined) run.inputTokens = patch.inputTokens
     if ('input_tokens' in patch && patch.input_tokens !== undefined) run.inputTokens = patch.input_tokens as number
     if (patch.outputTokens !== undefined) run.outputTokens = patch.outputTokens
@@ -240,48 +275,3 @@ export class MemoryWorkerStore implements WorkerStore {
     this.taskPatches.push({ taskId, patch })
   }
 }
-
-export class HttpWorkerStore implements WorkerStore {
-  private activeTaskId = '';
-
-  constructor(private client: SpecflowClient) {}
-
-  setActiveTask(taskId: string): void {
-    this.activeTaskId = taskId;
-  }
-
-  async createRun(input: { taskId: string; featureId: string }): Promise<string> {
-    this.activeTaskId = input.taskId;
-    return `run_${input.taskId}`;
-  }
-
-  async updateRun(runId: string, patch: Partial<RunRecord>): Promise<void> {
-    const status = patch.status === 'completed' ? 'completed' : 'failed';
-    await this.client.finishTask(this.activeTaskId, {
-      run_id: runId,
-      status,
-      error: patch.error,
-      input_tokens: patch.inputTokens,
-      output_tokens: patch.outputTokens,
-      cost_usd: patch.costUsd,
-    }).catch(() => {});
-  }
-
-  async emitRunEvent(
-    runId: string,
-    sequence: number,
-    type: RunEventType,
-    payload: unknown,
-  ): Promise<void> {
-    if (!RUN_EVENT_TYPES.has(type)) {
-      console.warn(`[worker] skipping unsupported run_event type "${type}"`);
-      return;
-    }
-    await this.client.sendEvents(this.activeTaskId, runId, [{ sequence, type, payload }]).catch(() => {});
-  }
-
-  async updateTask(taskId: string, patch: Record<string, unknown>): Promise<void> {
-    // Task state changes are synced through claimTask and finishTask on server
-  }
-}
-

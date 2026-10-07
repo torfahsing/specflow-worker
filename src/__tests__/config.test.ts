@@ -1,5 +1,5 @@
 import { describe, it, expect } from 'bun:test'
-import { parseEnv, resolveConfig, loadConfig } from '../config'
+import { parseEnv, resolveConfig, loadConfig, saveWorkerEnv } from '../config'
 import path from 'node:path'
 import { mkdtemp, rm, mkdir } from 'node:fs/promises'
 import { tmpdir, hostname } from 'node:os'
@@ -58,31 +58,31 @@ describe('parseEnv', () => {
 describe('resolveConfig', () => {
   it('uses env value when env[K] is defined (non-empty)', () => {
     const result = resolveConfig(
-      { POCKETBASE_URL: 'http://custom:8090' },
-      { POCKETBASE_URL: 'http://file:8090' },
+      { SPECFLOW_URL: 'http://custom:3200' },
+      { SPECFLOW_URL: 'http://file:3200' },
     )
-    expect(result.pocketbaseUrl).toBe('http://custom:8090')
+    expect(result.specflowUrl).toBe('http://custom:3200')
   })
 
   it('uses env value even when it is an empty string', () => {
     const result = resolveConfig(
-      { POCKETBASE_URL: '' },
-      { POCKETBASE_URL: 'http://file:8090' },
+      { SPECFLOW_URL: '' },
+      { SPECFLOW_URL: 'http://file:3200' },
     )
-    expect(result.pocketbaseUrl).toBe('')
+    expect(result.specflowUrl).toBe('')
   })
 
   it('falls through to file value when env[K] is undefined', () => {
     const result = resolveConfig(
-      { POCKETBASE_URL: undefined },
-      { POCKETBASE_URL: 'http://file:8090' },
+      { SPECFLOW_URL: undefined },
+      { SPECFLOW_URL: 'http://file:3200' },
     )
-    expect(result.pocketbaseUrl).toBe('http://file:8090')
+    expect(result.specflowUrl).toBe('http://file:3200')
   })
 
-  it('defaults pocketbaseUrl to http://127.0.0.1:8090', () => {
+  it('defaults specflowUrl to http://127.0.0.1:3200', () => {
     const result = resolveConfig({}, {})
-    expect(result.pocketbaseUrl).toBe('http://127.0.0.1:8090')
+    expect(result.specflowUrl).toBe('http://127.0.0.1:3200')
   })
 
   it('defaults workerName to the hostname', () => {
@@ -108,11 +108,11 @@ describe('resolveConfig', () => {
 
   it('envValues contains all file pairs including PATH', () => {
     const result = resolveConfig(
-      { POCKETBASE_URL: 'http://env:8090' },
-      { POCKETBASE_URL: 'http://file:8090', PATH: '/custom/path' },
+      { SPECFLOW_URL: 'http://env:3200' },
+      { SPECFLOW_URL: 'http://file:3200', PATH: '/custom/path' },
     )
     expect(result.envValues).toEqual({
-      POCKETBASE_URL: 'http://file:8090',
+      SPECFLOW_URL: 'http://file:3200',
       PATH: '/custom/path',
     })
   })
@@ -122,13 +122,13 @@ describe('loadConfig', () => {
   it('reads and parses a worker.env file', async () => {
     const tmpDir = await mkdtemp(path.join(tmpdir(), 'specflow-worker-config-'))
     const envPath = path.join(tmpDir, 'worker.env')
-    await Bun.write(envPath, 'POCKETBASE_URL=http://custom:8090\n')
+    await Bun.write(envPath, 'SPECFLOW_URL=http://custom:3200\n')
 
     const config = await loadConfig({
       env: {},
       workerEnvPath: envPath,
     })
-    expect(config.pocketbaseUrl).toBe('http://custom:8090')
+    expect(config.specflowUrl).toBe('http://custom:3200')
     expect(config.workerEnvPath).toBe(envPath)
 
     await rm(tmpDir, { recursive: true, force: true })
@@ -142,7 +142,7 @@ describe('loadConfig', () => {
       env: {},
       workerEnvPath: envPath,
     })
-    expect(config.pocketbaseUrl).toBe('http://127.0.0.1:8090')
+    expect(config.specflowUrl).toBe('http://127.0.0.1:3200')
     expect(config.workerName).toBe(hostname())
 
     await rm(tmpDir, { recursive: true, force: true })
@@ -162,7 +162,7 @@ describe('loadConfig', () => {
     await rm(tmpDir, { recursive: true, force: true })
   })
 
-  it('never writes the worker.env file', async () => {
+  it('never writes the worker.env file in loadConfig', async () => {
     const tmpDir = await mkdtemp(path.join(tmpdir(), 'specflow-worker-config-'))
     const envPath = path.join(tmpDir, 'worker.env')
 
@@ -171,9 +171,51 @@ describe('loadConfig', () => {
       workerEnvPath: envPath,
     })
 
-    // file should still not exist
     const exists = await Bun.file(envPath).exists()
     expect(exists).toBe(false)
+
+    await rm(tmpDir, { recursive: true, force: true })
+  })
+})
+
+describe('saveWorkerEnv', () => {
+  it('creates directory and writes worker configuration', async () => {
+    const tmpDir = await mkdtemp(path.join(tmpdir(), 'specflow-worker-config-'))
+    const envPath = path.join(tmpDir, '.specflow', 'worker.env')
+
+    const saved = await saveWorkerEnv(
+      {
+        specflowUrl: 'https://dogfood.specflow.dev',
+        specflowToken: 'sfw_live_test123',
+        workerName: 'test-runner',
+      },
+      envPath,
+    )
+
+    expect(saved).toBe(envPath)
+    const text = await Bun.file(envPath).text()
+    expect(text).toContain('SPECFLOW_URL=https://dogfood.specflow.dev')
+    expect(text).toContain('SPECFLOW_TOKEN=sfw_live_test123')
+    expect(text).toContain('WORKER_NAME=test-runner')
+
+    await rm(tmpDir, { recursive: true, force: true })
+  })
+
+  it('preserves existing custom keys when updating', async () => {
+    const tmpDir = await mkdtemp(path.join(tmpdir(), 'specflow-worker-config-'))
+    const envPath = path.join(tmpDir, 'worker.env')
+    await Bun.write(envPath, 'CUSTOM_VAR=hello\nSPECFLOW_TOKEN=old_token\n')
+
+    await saveWorkerEnv(
+      {
+        specflowToken: 'new_token',
+      },
+      envPath,
+    )
+
+    const text = await Bun.file(envPath).text()
+    expect(text).toContain('CUSTOM_VAR=hello')
+    expect(text).toContain('SPECFLOW_TOKEN=new_token')
 
     await rm(tmpDir, { recursive: true, force: true })
   })

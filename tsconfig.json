@@ -27,7 +27,5 @@
     "noUnusedParameters": false,
     "noPropertyAccessFromIndexSignature": false
   },
-  // pb_migrations run inside PocketBase's JS engine (goja), not Bun, and
-  // reference ../pb_data/types.d.ts which does not exist in this repo.
-  "exclude": ["node_modules", "bin", "pb_migrations"]
+  "exclude": ["node_modules", "bin"]
 }

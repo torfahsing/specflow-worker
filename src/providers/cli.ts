@@ -149,8 +149,9 @@ export function createNdjsonParser(
             obj.usage.output_tokens ??
             0,
         }
-        if (typeof obj.usage.cost === 'number') {
-          stream.cost = (stream.cost ?? 0) + obj.usage.cost
+        const costVal = obj.usage.cost ?? obj.usage.cost_usd ?? obj.cost ?? obj.cost_usd
+        if (typeof costVal === 'number') {
+          stream.cost = (stream.cost ?? 0) + costVal
         }
       } else if (obj.type === 'agent_end') {
         lastReasoningText = ''
@@ -277,6 +278,26 @@ export async function runProvider(
     timeout: timeoutMs,
   })
 
+  let killEscalationTimer: any = null
+  const onAbort = () => {
+    try {
+      console.log(`[cli] abort signal triggered — terminating child process (SIGTERM)`)
+      proc.kill('SIGTERM')
+      killEscalationTimer = setTimeout(() => {
+        try {
+          console.log(`[cli] child process still alive after 1.5s — escalating to SIGKILL`)
+          proc.kill('SIGKILL')
+        } catch {}
+      }, 1500)
+      killEscalationTimer.unref?.()
+    } catch {}
+  }
+  if (signal.aborted) {
+    onAbort()
+  } else {
+    signal.addEventListener('abort', onAbort, { once: true })
+  }
+
   // --- Write prompt to stdin (EPIPE-safe) ---
   try {
     proc.stdin.write(prompt)
@@ -310,7 +331,7 @@ export async function runProvider(
   let lineBuffer = ''
 
   // Drain stdout chunk-by-chunk
-  ;(async () => {
+  const stdoutDrain = (async () => {
     try {
       for await (const chunk of proc.stdout) {
         lineBuffer += decoder.decode(chunk, { stream: true })
@@ -327,18 +348,20 @@ export async function runProvider(
 
   // --- Drain stderr concurrently ---
   let stderr = ''
-  ;(async () => {
+  const stderrDecoder = new TextDecoder('utf-8')
+  const stderrDrain = (async () => {
     try {
       for await (const chunk of proc.stderr) {
-        stderr += chunk.toString()
+        stderr += stderrDecoder.decode(chunk, { stream: true })
       }
+      stderr += stderrDecoder.decode()
     } catch {
       // stderr stream ended or was aborted
     }
   })()
 
-  // --- Wait for process exit ---
-  const exitCode = await proc.exited
+  // --- Wait for process exit and streams to drain ---
+  const [exitCode] = await Promise.all([proc.exited, stdoutDrain, stderrDrain])
   const signalCode = proc.signalCode
 
   // --- Flush any remaining partial line ---
@@ -348,8 +371,10 @@ export async function runProvider(
     parser(lineBuffer)
   }
 
-  // --- Clear timeout timer ---
+  // --- Clear timeout timer and abort handlers ---
   clearTimeout(timeoutTimer)
+  signal.removeEventListener('abort', onAbort)
+  if (killEscalationTimer) clearTimeout(killEscalationTimer)
 
   // --- Diagnostics: exit line ---
   const resultChars = stream.resultText.length

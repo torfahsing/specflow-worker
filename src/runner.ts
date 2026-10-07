@@ -18,7 +18,7 @@ import type { WorkerConfig } from './config.js'
 import type { ClaimedTask } from './queue.js'
 import type { ProviderRunResult, ProviderStream, ProviderEvent } from './providers/cli.js'
 import { RunRecorder } from './events.js'
-import type { getCurrentBranch, branchExists, createBranch, checkoutBranch, getBoundedDiff } from './git/utils.js'
+import type { getCurrentBranch, branchExists, createBranch, checkoutBranch, getBoundedDiff, discardWorkingChanges, commitChanges } from './git/utils.js'
 import { parseStructuredOutput } from './providers/structured-parser.js'
 
 // ---------------------------------------------------------------------------
@@ -64,9 +64,12 @@ function coerceArray(value: unknown): string[] {
 export async function executeClaimedTask(
   claimed: ClaimedTask,
   deps: RunDeps,
-  signal: AbortSignal,
+  signal?: AbortSignal,
 ): Promise<ExecutionOutcome> {
-  const { store, presence, config, git, provider } = deps
+  const effectiveSignal = signal ?? (deps as any).abortSignal ?? (deps as any).signal
+  const effectiveConfig = deps.config ?? (deps as any).workerConfig ?? {}
+  const { store, presence, git, provider } = deps
+  const config = effectiveConfig
   const gitModule = git ?? await import('./git/utils.js')
   const runProviderFn = provider ?? (await import('./providers/cli.js')).runProvider
 
@@ -74,15 +77,21 @@ export async function executeClaimedTask(
   const featureId = claimed.featureId
   const record = claimed.record
   const feature = record.expand?.feature ?? {}
+  const taskType = ((record.type || record.task_type || '') as string).toLowerCase()
+  const isChat = Boolean(claimed.isChat || taskType === 'chat_step')
 
-  // Step 1: start the run recorder + set presence busy
+  // Step 1: start the run recorder + set presence busy (chat does not alter workflow busy state)
   const recorder = await RunRecorder.start(store, { taskId, featureId, runId: claimed.runId })
-  presence.setBusy(true)
+  if (!isChat) {
+    presence.setBusy(true)
+  }
 
   // Step 2: resolve execution inputs
   let prompt = record.prompt as string | undefined
   const command = record.provider_command as string | undefined
-  const model = record.model as string | undefined
+  const models: string[] = Array.isArray(record.models)
+    ? record.models
+    : (record.model ? [record.model] : [])  // back-compat: old single-model tasks
   const allowedTools = coerceArray(record.allowed_tools)
   const timeoutMs = normalizeTimeout(record.timeout)
   const cwd = (feature.project_dir || record.project_dir) as string | undefined
@@ -90,11 +99,23 @@ export async function executeClaimedTask(
   const outputSchema = record.output_schema as Record<string, any> | undefined
 
   // Step 3: pre-run input failures
+  const roleName = ((record.role || record.agent || '') as string).toLowerCase()
+  const EXCLUDED_ROLES = new Set(['colleague', 'chat', 'colleague_chat', 'colleague-chat'])
+  const EXCLUDED_TYPES = new Set(['chat', 'colleague_chat', 'colleague-chat', 'conversation'])
+
+  if (!isChat && (EXCLUDED_ROLES.has(roleName) || EXCLUDED_TYPES.has(taskType))) {
+    const error = `Colleague chat tasks are handled by orchestrator, not worker (task "${taskId}").`
+    await recorder.finalize({ status: 'failed', error })
+    await store.updateTask(taskId, { status: 'failed', error })
+    presence.setBusy(false)
+    return { status: 'failed', runId: recorder.runId, error }
+  }
+
   if (!prompt) {
     const error = `Task "${taskId}" has no "prompt" — prompt assembly happens upstream before queueing.`
     await recorder.finalize({ status: 'failed', error })
     await store.updateTask(taskId, { status: 'failed', error })
-    presence.setBusy(false)
+    if (!isChat) presence.setBusy(false)
     return { status: 'failed', runId: recorder.runId, error }
   }
 
@@ -102,26 +123,31 @@ export async function executeClaimedTask(
     const error = `Task "${taskId}" has no "provider_command".`
     await recorder.finalize({ status: 'failed', error })
     await store.updateTask(taskId, { status: 'failed', error })
-    presence.setBusy(false)
+    if (!isChat) presence.setBusy(false)
     return { status: 'failed', runId: recorder.runId, error }
   }
 
   if (!cwd) {
-    const error = `Feature "${featureId}" has no "project_dir".`
+    const error = featureId
+      ? `Feature "${featureId}" has no "project_dir".`
+      : `Task "${taskId}" has no "project_dir".`
     await recorder.finalize({ status: 'failed', error })
     await store.updateTask(taskId, { status: 'failed', error })
-    presence.setBusy(false)
+    if (!isChat) presence.setBusy(false)
     return { status: 'failed', runId: recorder.runId, error }
   }
 
-  // Step 4: branch alignment
-  if (branch) {
+  // Step 4: branch alignment (bypassed for sidecar chat tasks)
+  if (branch && !isChat) {
     try {
       const current = await gitModule.getCurrentBranch(cwd)
       if (current !== branch) {
         if (!(await gitModule.branchExists(cwd, branch))) {
-          console.log(`[git] creating missing branch '${branch}'`)
-          await gitModule.createBranch(cwd, branch)
+          const defaultBranch = gitModule.getDefaultBranch
+            ? await gitModule.getDefaultBranch(cwd)
+            : 'main'
+          console.log(`[git] creating missing branch '${branch}' from '${defaultBranch}'`)
+          await gitModule.createBranch(cwd, branch, defaultBranch)
         }
         console.log(`[git] switching to branch '${branch}' (was '${current}')`)
         await gitModule.checkoutBranch(cwd, branch)
@@ -135,7 +161,7 @@ export async function executeClaimedTask(
       return { status: 'failed', runId: recorder.runId, error }
     }
   } else {
-    console.log(`[git] skipping branch alignment (no branch specified)`)
+    console.log(`[git] skipping branch alignment (${isChat ? 'chat task' : 'no branch specified'})`)
   }
 
   // Context protection: check for bounded diff if review task or requested
@@ -159,54 +185,89 @@ export async function executeClaimedTask(
     }
   }
 
-  // Step 5: spawn with AbortController linked to shutdown signal
+  // Step 5: spawn — iterate through models locally, no round-trip per retry
   const controller = new AbortController()
   const abortListener = () => controller.abort()
-  signal.addEventListener('abort', abortListener, { once: true })
+  if (effectiveSignal) {
+    effectiveSignal.addEventListener('abort', abortListener, { once: true })
+  }
 
-  let result: ProviderRunResult
-  let cancelled = false
+  const modelsToTry = models.length > 0 ? models : [undefined]  // undefined = provider default
+  let result: ProviderRunResult | undefined
+  let lastError: string | undefined
 
-  try {
+  for (let i = 0; i < modelsToTry.length; i++) {
+    const model = modelsToTry[i]
+    const attempt = `${i + 1}/${modelsToTry.length}`
     console.log(
-      `[runner] executeClaimedTask: task=${taskId} feature=${featureId} cwd=${cwd} branch=${branch ?? 'none'} provider=${command} model=${model ?? 'none'} timeout=${timeoutMs / 1000}s`,
+      `[runner] executeClaimedTask: task=${taskId} feature=${featureId} cwd=${cwd} branch=${branch ?? 'none'} provider=${command} model=${model ?? 'default'} attempt=${attempt} timeout=${timeoutMs / 1000}s`,
     )
 
-    result = await runProviderFn(
-      {
-        command,
-        model,
-        allowedTools,
-        prompt,
-        cwd,
-        timeoutMs,
-        signal: controller.signal,
-        pathOverride: config.pathOverride,
-        extraEnv: config.envValues,
-        outputSchemaPath: stagedSchemaPath,
-      },
-      async (e: ProviderEvent) => {
-        await recorder.emit(e.type, e.payload)
-      },
-    )
-  } catch (err) {
-    if (stagedSchemaPath) {
-      await rm(stagedSchemaPath, { force: true }).catch(() => {})
+    try {
+      result = await runProviderFn(
+        {
+          command,
+          model,
+          allowedTools,
+          prompt,
+          cwd,
+          timeoutMs,
+          signal: controller.signal,
+          pathOverride: config.pathOverride,
+          extraEnv: config.envValues,
+          outputSchemaPath: stagedSchemaPath,
+        },
+        async (e: ProviderEvent) => {
+          if (e.type === 'tool_call' || e.type === 'tool_result') {
+            return // drop tool events from SSE/HTTP streaming
+          }
+          await recorder.emit(e.type, e.payload)
+        },
+      )
+      if (!result.error && !result.cancelled) break  // success — stop trying
+      lastError = result.error
+      if (result.cancelled) break  // aborted — don't try next model
+      if (i < modelsToTry.length - 1) {
+        console.log(`[runner] model "${model}" failed, trying next model...`)
+        if (!isChat && cwd && gitModule.discardWorkingChanges) {
+          console.log(`[runner] discarding dirty changes before retry with next model`)
+          await gitModule.discardWorkingChanges(cwd)
+        }
+      }
+    } catch (err) {
+      lastError = (err as Error).message
+      if (i < modelsToTry.length - 1) {
+        console.log(`[runner] model "${model}" threw error: ${lastError}, trying next model...`)
+        if (!isChat && cwd && gitModule.discardWorkingChanges) {
+          console.log(`[runner] discarding dirty changes before retry with next model`)
+          await gitModule.discardWorkingChanges(cwd)
+        }
+      }
     }
-    const error = (err as Error).message
+  }
+
+  if (!result) {
+    if (stagedSchemaPath) await rm(stagedSchemaPath, { force: true }).catch(() => {})
+    if (!isChat && cwd && gitModule.discardWorkingChanges) {
+      console.log(`[runner] discarding dirty changes after failed task "${taskId}"`)
+      await gitModule.discardWorkingChanges(cwd)
+    }
+    const error = lastError ?? 'All models failed'
     await recorder.finalize({ status: 'failed', error })
     await store.updateTask(taskId, { status: 'failed', error })
-    presence.setBusy(false)
-    signal.removeEventListener('abort', abortListener)
+    if (!isChat) presence.setBusy(false)
+    effectiveSignal?.removeEventListener('abort', abortListener)
     return { status: 'failed', runId: recorder.runId, error }
   }
 
   // Step 6: classification determines outcome
-  cancelled = result.cancelled
-
-  if (cancelled) {
+  if (result.cancelled) {
     if (stagedSchemaPath) {
       await rm(stagedSchemaPath, { force: true }).catch(() => {})
+    }
+    if (!isChat && cwd && gitModule.discardWorkingChanges) {
+      console.log(`[runner] discarding dirty changes after cancelled task "${taskId}"`)
+      await gitModule.discardWorkingChanges(cwd)
     }
     await recorder.emitTerminalError({
       message: 'Aborted',
@@ -219,8 +280,8 @@ export async function executeClaimedTask(
       status: 'queued',
       assigned_worker: null,
     })
-    presence.setBusy(false)
-    signal.removeEventListener('abort', abortListener)
+    if (!isChat) presence.setBusy(false)
+    effectiveSignal?.removeEventListener('abort', abortListener)
     return { status: 'cancelled', runId: recorder.runId }
   }
 
@@ -245,7 +306,7 @@ export async function executeClaimedTask(
           const repairResult = await runProviderFn(
             {
               command,
-              model,
+              model: (result as any).model ?? modelsToTry[modelsToTry.length - 1],
               allowedTools: [],
               prompt: repairPrompt,
               cwd,
@@ -283,6 +344,10 @@ export async function executeClaimedTask(
 
   // Step 8: terminal error event for non-cancellation failures
   if (result.error) {
+    if (!isChat && cwd && gitModule.discardWorkingChanges) {
+      console.log(`[runner] discarding dirty changes after failed task "${taskId}"`)
+      await gitModule.discardWorkingChanges(cwd)
+    }
     await recorder.emitTerminalError({
       message: result.error,
       exit_code: result.exitCode,
@@ -290,17 +355,49 @@ export async function executeClaimedTask(
     })
     await recorder.finalize({ status: 'failed', error: result.error })
     await store.updateTask(taskId, { status: 'failed', error: result.error })
-    presence.setBusy(false)
-    signal.removeEventListener('abort', abortListener)
+    if (!isChat) presence.setBusy(false)
+    effectiveSignal?.removeEventListener('abort', abortListener)
     return { status: 'failed', runId: recorder.runId, error: result.error }
   }
 
-  // Clean success path
+  // Clean success path - only commit if task is an implementation/feature task with a branch or write tools
+  const canModifyFiles = allowedTools.some(t => ['file_write', 'file_edit', 'shell'].includes(t))
+  if (!isChat && cwd && branch && canModifyFiles && gitModule.commitChanges) {
+    const displayTaskId = (record.task_id || taskId) as string
+    const title = (record.title || displayTaskId) as string
+    try {
+      await gitModule.commitChanges(cwd, `task(${displayTaskId}): ${title}`)
+      console.log(`[runner] committed changes for task "${displayTaskId}"`)
+    } catch (commitErr: any) {
+      console.warn(`[runner] commit for task "${displayTaskId}" failed:`, commitErr?.message)
+    }
+  }
+
   const tokens = result.stream.tokens
   const costUsd = result.stream.cost
+  const rawOutput = parsedStructuredOutput !== undefined
+    ? parsedStructuredOutput
+    : (result.stream.resultText || undefined)
+
+  // Mandatory output contract: completed tasks must produce non-empty output
+  const hasOutput = rawOutput !== undefined &&
+    rawOutput !== null &&
+    (typeof rawOutput !== 'string' || rawOutput.trim() !== '')
+
+  if (!hasOutput) {
+    const error = `Task "${taskId}" completed with empty output.`
+    await recorder.finalize({ status: 'failed', error })
+    await store.updateTask(taskId, { status: 'failed', error })
+    if (!isChat) presence.setBusy(false)
+    effectiveSignal?.removeEventListener('abort', abortListener)
+    return { status: 'failed', runId: recorder.runId, error }
+  }
+
+  const taskOutput = rawOutput
 
   await recorder.finalize({
     status: 'completed',
+    output: taskOutput,
     tokens: tokens
       ? { input: tokens.input, output: tokens.output }
       : undefined,
@@ -309,15 +406,15 @@ export async function executeClaimedTask(
 
   await store.updateTask(taskId, {
     status: 'done',
-    output: parsedStructuredOutput,
+    output: taskOutput,
   })
-  presence.setBusy(false)
-  signal.removeEventListener('abort', abortListener)
+  if (!isChat) presence.setBusy(false)
+  effectiveSignal?.removeEventListener('abort', abortListener)
 
   return {
     status: 'done',
     runId: recorder.runId,
-    output: parsedStructuredOutput,
+    output: taskOutput,
   }
 }
 

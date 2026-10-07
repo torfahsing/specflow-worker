@@ -1,227 +1,184 @@
 import { describe, it, expect, beforeEach } from 'bun:test'
 import {
-  PocketBaseStore,
+  HttpWorkerStore,
   MemoryWorkerStore,
   RUN_EVENT_TYPES,
   type WorkerStore,
   type RunEventType,
 } from '../store'
-import type PocketBase from 'pocketbase'
+import type { SpecflowClient } from '../client'
 
 // ---------------------------------------------------------------------------
-// PocketBaseStore — stub pb
+// HttpWorkerStore tests with mock SpecflowClient
 // ---------------------------------------------------------------------------
 
-function makeStubPb() {
+function makeStubClient() {
   const calls = {
-    runsCreate: 0,
-    runsUpdate: 0,
-    runEventsCreate: 0,
-    tasksUpdate: 0,
+    finishTask: 0,
+    sendEvents: 0,
   }
-  const records = new Map<string, any>()
+  const finishedPayloads: any[] = []
+  const sentEvents: any[] = []
 
-  const pb = {
-    collection(name: string) {
-      return {
-        create(data: any) {
-          if (name === 'runs') calls.runsCreate++
-          if (name === 'run_events') calls.runEventsCreate++
-          if (name === 'tasks') calls.tasksUpdate++
-          const id = `rec_${name}_${calls.runsCreate + calls.runEventsCreate + calls.tasksUpdate}`
-          records.set(id, { id, ...data })
-          return { id, ...data }
-        },
-        update(id: string, data: any) {
-          if (name === 'runs') calls.runsUpdate++
-          if (name === 'tasks') calls.tasksUpdate++
-          const existing = records.get(id)
-          if (existing) {
-            records.set(id, { ...existing, ...data })
-          }
-          return { id, ...data }
-        },
-      }
+  const client = {
+    async finishTask(taskId: string, payload: any) {
+      calls.finishTask++
+      finishedPayloads.push({ taskId, ...payload })
+      return { status: 'ok' }
     },
-  }
+    async sendEvents(taskId: string, runId: string, events: any[]) {
+      calls.sendEvents++
+      sentEvents.push({ taskId, runId, events })
+      return { status: 'ok', count: events.length }
+    },
+  } as unknown as SpecflowClient
 
-  return { pb: pb as unknown as PocketBase, calls, records }
+  return { client, calls, finishedPayloads, sentEvents }
 }
 
-describe('PocketBaseStore — collection names & field mapping', () => {
-  it('createRun calls pb.collection("runs").create with snake_case keys', async () => {
-    const { pb, calls } = makeStubPb()
-    const store = new PocketBaseStore(pb)
+describe('HttpWorkerStore — HTTP API delegation', () => {
+  it('createRun sets active task and returns a run ID', async () => {
+    const { client } = makeStubClient()
+    const store = new HttpWorkerStore(client)
 
-    const id = await store.createRun({ taskId: 'task_1', featureId: 'feat_1' })
+    const runId = await store.createRun({ taskId: 't1', featureId: 'f1' })
 
-    expect(id).toBeTruthy()
-    expect(calls.runsCreate).toBe(1)
-    const run = Array.from(
-      (pb as any).collection('runs') !== undefined ? [] : [],
-    ) // no-op, just verifying the call happened
-    // Verify the record was created with correct fields by checking calls
+    expect(runId).toBe('run_t1')
   })
 
-  it('createRun returns the record id', async () => {
-    const { pb } = makeStubPb()
-    const store = new PocketBaseStore(pb)
+  it('updateRun delegates to client.finishTask with mapped status', async () => {
+    const { client, calls, finishedPayloads } = makeStubClient()
+    const store = new HttpWorkerStore(client)
 
-    const id = await store.createRun({ taskId: 't1', featureId: 'f1' })
+    await store.createRun({ taskId: 'task_abc', featureId: 'feat_1' })
+    await store.updateRun('run_task_abc', {
+      status: 'completed',
+      inputTokens: 100,
+      outputTokens: 50,
+      costUsd: 0.002,
+    })
 
-    expect(typeof id).toBe('string')
-    expect(id.length).toBeGreaterThan(0)
+    expect(calls.finishTask).toBe(1)
+    expect(finishedPayloads[0]).toEqual({
+      taskId: 'task_abc',
+      run_id: 'run_task_abc',
+      status: 'completed',
+      error: undefined,
+      input_tokens: 100,
+      output_tokens: 50,
+      cost_usd: 0.002,
+    })
   })
 
-  it('createRun does not send undefined fields', async () => {
-    const { pb, calls } = makeStubPb()
-    const store = new PocketBaseStore(pb)
+  it('emitRunEvent forwards valid event types to client.sendEvents', async () => {
+    const { client, calls, sentEvents } = makeStubClient()
+    const store = new HttpWorkerStore(client)
 
+    await store.createRun({ taskId: 'task_1', featureId: 'feat_1' })
+    await store.emitRunEvent('run_task_1', 1, 'tool_call', { name: 'file_read' })
+
+    expect(calls.sendEvents).toBe(1)
+    expect(sentEvents[0]).toEqual({
+      taskId: 'task_1',
+      runId: 'run_task_1',
+      events: [{ sequence: 1, type: 'tool_call', payload: { name: 'file_read' } }],
+    })
+  })
+
+  it('emitRunEvent drops unsupported types with a warning', async () => {
+    const { client, calls } = makeStubClient()
+    const store = new HttpWorkerStore(client)
+
+    await store.createRun({ taskId: 'task_1', featureId: 'feat_1' })
+    await store.emitRunEvent('run_task_1', 1, 'unsupported_type' as RunEventType, {})
+
+    expect(calls.sendEvents).toBe(0)
+  })
+
+  it('updateRun catches network errors gracefully without crashing', async () => {
+    const failingClient = {
+      async finishTask() {
+        throw new Error('network down')
+      },
+    } as unknown as SpecflowClient
+
+    const store = new HttpWorkerStore(failingClient)
     await store.createRun({ taskId: 't1', featureId: 'f1' })
 
-    // The create call should only have task, feature, status — no undefined keys
-    const runRecords = Array.from((pb as any).__records?.values() ?? [])
-    // We verify by checking the stub recorded the data correctly
-    expect(calls.runsCreate).toBe(1)
-  })
-
-  it('updateRun omits undefined values from the patch', async () => {
-    const { pb } = makeStubPb()
-    const store = new PocketBaseStore(pb)
-
-    // Create a run first
-    const runId = await store.createRun({ taskId: 't1', featureId: 'f1' })
-
-    // Update with only defined keys
-    await store.updateRun(runId, { status: 'completed', inputTokens: 100 })
-
-    expect(pb.collection('runs').update).toBeDefined()
-  })
-
-  it('emitRunEvent calls pb.collection("run_events").create with correct fields', async () => {
-    const { pb } = makeStubPb()
-    const store = new PocketBaseStore(pb)
-
-    const runId = await store.createRun({ taskId: 't1', featureId: 'f1' })
-    await store.emitRunEvent(runId, 1, 'text', { content: 'hello' })
-
-    // Verify the event was created (no throw)
-    expect(true).toBe(true)
-  })
-
-  it('updateTask calls pb.collection("tasks").update', async () => {
-    const { pb } = makeStubPb()
-    const store = new PocketBaseStore(pb)
-
-    await store.updateTask('task_1', { status: 'done' })
-
-    expect(true).toBe(true)
-  })
-})
-
-describe('PocketBaseStore — non-throwing on PB failures', () => {
-  it('createRun rejection resolves without throwing and logs [pb]', async () => {
-    const failingPb = {
-      collection(name: string) {
-        return {
-          create() {
-            throw new Error('network error')
-          },
-          update() {
-            throw new Error('network error')
-          },
-        }
-      },
-    } as unknown as PocketBase
-
-    const store = new PocketBaseStore(failingPb)
-    const result = await store.createRun({ taskId: 't1', featureId: 'f1' })
-
-    expect(result).toBe('')
-  })
-
-  it('updateRun rejection resolves without throwing', async () => {
-    const failingPb = {
-      collection(name: string) {
-        return {
-          create() {
-            throw new Error('network error')
-          },
-          update() {
-            throw new Error('network error')
-          },
-        }
-      },
-    } as unknown as PocketBase
-
-    const store = new PocketBaseStore(failingPb)
     await expect(
-      store.updateRun('run_1', { status: 'failed' }),
+      store.updateRun('run_t1', { status: 'failed', error: 'some error' }),
     ).resolves.toBeUndefined()
   })
 
-  it('emitRunEvent rejection resolves without throwing', async () => {
-    const failingPb = {
-      collection(name: string) {
-        return {
-          create() {
-            throw new Error('network error')
-          },
-          update() {
-            throw new Error('network error')
-          },
-        }
-      },
-    } as unknown as PocketBase
+  it('batches text/reasoning events and flushes before finishTask', async () => {
+    const { client, calls, sentEvents, finishedPayloads } = makeStubClient()
+    const store = new HttpWorkerStore(client)
 
-    const store = new PocketBaseStore(failingPb)
-    await expect(
-      store.emitRunEvent('run_1', 1, 'text', { content: 'hi' }),
-    ).resolves.toBeUndefined()
+    await store.createRun({ taskId: 't_stream', featureId: 'f1' })
+    await store.emitRunEvent('run_t_stream', 1, 'text', { content: 'hello ' })
+    await store.emitRunEvent('run_t_stream', 2, 'text', { content: 'world' })
+
+    // Events are buffered in memory and not yet sent immediately
+    expect(calls.sendEvents).toBe(0)
+
+    // Finalizing run flushes buffered events before finishTask
+    await store.updateRun('run_t_stream', { status: 'completed', output: 'hello world' })
+
+    expect(calls.sendEvents).toBe(1)
+    expect(sentEvents[0].events).toHaveLength(2)
+    expect(sentEvents[0].events[0].payload).toEqual({ content: 'hello ' })
+    expect(sentEvents[0].events[1].payload).toEqual({ content: 'world' })
+
+    expect(calls.finishTask).toBe(1)
+    expect(finishedPayloads[0].output).toBe('hello world')
   })
-})
 
-describe('PocketBaseStore — updateTask retry', () => {
-  it('throws only after exactly one retry (update called twice)', async () => {
-    let callCount = 0
-    const failingPb = {
-      collection(name: string) {
-        return {
-          create() {
-            throw new Error('network error')
-          },
-          update(_id: string, _data: any) {
-            callCount++
-            throw new Error('persistent failure')
-          },
-        }
-      },
-    } as unknown as PocketBase
+  it('isolates events and finishes between concurrent runs without crosstalk', async () => {
+    const { client, sentEvents, finishedPayloads } = makeStubClient()
+    const store = new HttpWorkerStore(client)
 
-    const store = new PocketBaseStore(failingPb)
+    // Two tasks run concurrently
+    const run1 = await store.createRun({ taskId: 'task_feature_spec', featureId: 'feat_spec' })
+    const run2 = await store.createRun({ taskId: 'task_chat_step', featureId: 'feat_chat' })
 
-    await expect(
-      store.updateTask('task_1', { status: 'failed' }),
-    ).rejects.toThrow(/failed to update task/)
+    // Task 1 emits spec events
+    await store.emitRunEvent(run1, 1, 'text', { content: 'Specifying selector-width' })
 
-    expect(callCount).toBe(2) // initial + one retry
-  })
-})
+    // Task 2 emits chat events
+    await store.emitRunEvent(run2, 1, 'reasoning', { thought: 'Researching menu floor' })
+    await store.emitRunEvent(run2, 2, 'text', { content: 'Menu floor research findings' })
 
-describe('PocketBaseStore — unsupported event type guard', () => {
-  it('skips unsupported run_event type with a warning', async () => {
-    const { pb } = makeStubPb()
-    const store = new PocketBaseStore(pb)
+    // Task 1 emits another spec event
+    await store.emitRunEvent(run1, 2, 'text', { content: 'Additional spec content' })
 
-    // Create a run first
-    const runId = await store.createRun({ taskId: 't1', featureId: 'f1' })
+    // Finish task 2 (chat)
+    await store.updateRun(run2, { status: 'completed', output: 'Chat output' })
 
-    // Emit an unsupported type — should not throw and should not create an event
-    await store.emitRunEvent(runId, 1, 'assistant' as RunEventType, {})
+    // Task 2 finish must be for task_chat_step, NOT task_feature_spec
+    expect(finishedPayloads).toHaveLength(1)
+    expect(finishedPayloads[0].taskId).toBe('task_chat_step')
+    expect(finishedPayloads[0].output).toBe('Chat output')
 
-    // The unsupported type should not have created a run_event
-    // (verify by checking that run_events.create was not called for this)
-    expect(true).toBe(true)
+    // Finish task 1 (spec)
+    await store.updateRun(run1, { status: 'completed', output: 'Spec output' })
+
+    expect(finishedPayloads).toHaveLength(2)
+    expect(finishedPayloads[1].taskId).toBe('task_feature_spec')
+    expect(finishedPayloads[1].output).toBe('Spec output')
+
+    // Events for task_feature_spec must ONLY contain spec events
+    const specEventsBatch = sentEvents.filter((s: any) => s.taskId === 'task_feature_spec')
+    const allSpecPayloads = specEventsBatch.flatMap((s: any) => s.events.map((e: any) => e.payload.content))
+    expect(allSpecPayloads).toContain('Specifying selector-width')
+    expect(allSpecPayloads).toContain('Additional spec content')
+    expect(allSpecPayloads).not.toContain('Menu floor research findings')
+
+    // Events for task_chat_step must ONLY contain chat events
+    const chatEventsBatch = sentEvents.filter((s: any) => s.taskId === 'task_chat_step')
+    const allChatPayloads = chatEventsBatch.flatMap((s: any) => s.events.map((e: any) => e.payload.content || e.payload.thought))
+    expect(allChatPayloads).toContain('Researching menu floor')
+    expect(allChatPayloads).toContain('Menu floor research findings')
+    expect(allChatPayloads).not.toContain('Specifying selector-width')
   })
 })
 
@@ -315,21 +272,7 @@ describe('RUN_EVENT_TYPES', () => {
     expect(RUN_EVENT_TYPES.has('agent_end')).toBe(false)
   })
 
-  it('matches the run_events.type select values from the migration', () => {
-    // pb_migrations/1800000002_runs_run_events.js defines:
-    //   { name: "type", type: "select", values: ["text", "reasoning", "tool_call", "tool_result", "error"] }
-    const migrationValues = new Set([
-      'text',
-      'reasoning',
-      'tool_call',
-      'tool_result',
-      'error',
-    ])
-    expect(RUN_EVENT_TYPES).toEqual(migrationValues)
-  })
-
   it('is a ReadonlySet', () => {
     expect(RUN_EVENT_TYPES).toBeInstanceOf(Set)
-    // TypeScript ReadonlySet — runtime check is just Set
   })
 })

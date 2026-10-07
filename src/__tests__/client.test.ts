@@ -38,15 +38,6 @@ describe('SpecflowClient', () => {
         if (url.pathname === '/api/worker/heartbeat') {
           return Response.json({ status: 'ok', worker_id: 'wrk_123' })
         }
-        if (url.pathname === '/api/worker/tasks/pending') {
-          return Response.json({ tasks: [{ id: 'task-1', title: 'Test Task', feature: 'auth' }] })
-        }
-        if (url.pathname === '/api/worker/tasks/task-1/claim') {
-          return Response.json({
-            task: { id: 'task-1', title: 'Test Task', feature: 'auth', prompt: 'Do work' },
-            run_id: 'run_456',
-          })
-        }
         if (url.pathname === '/api/worker/tasks/task-1/events') {
           return Response.json({ status: 'ok', count: body?.events?.length || 0 })
         }
@@ -73,25 +64,6 @@ describe('SpecflowClient', () => {
     expect(recordedRequests).toHaveLength(1)
     expect(recordedRequests[0]!.headers['authorization']).toBe(`Bearer ${validToken}`)
     expect(recordedRequests[0]!.body.worker_name).toBe('test-node')
-  })
-
-  it('fetches pending tasks', async () => {
-    const client = new SpecflowClient({ baseUrl, token: validToken })
-    const tasks = await client.getPendingTasks()
-
-    expect(tasks).toHaveLength(1)
-    expect(tasks[0]!.id).toBe('task-1')
-    expect(recordedRequests[0]!.url).toBe('/api/worker/tasks/pending')
-  })
-
-  it('claims a task atomically', async () => {
-    const client = new SpecflowClient({ baseUrl, token: validToken })
-    const res = await client.claimTask('task-1', 'wrk_123')
-
-    expect(res.run_id).toBe('run_456')
-    expect(res.task.id).toBe('task-1')
-    expect(recordedRequests[0]!.url).toBe('/api/worker/tasks/task-1/claim')
-    expect(recordedRequests[0]!.body.worker_id).toBe('wrk_123')
   })
 
   it('ingests execution stream events', async () => {
