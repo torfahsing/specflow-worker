@@ -250,7 +250,7 @@ export async function createPullRequest(
   }
 }
 
-const EXT_LANGUAGE: Record<string, string> = {
+export const EXT_LANGUAGE: Record<string, string> = {
   '.ts': 'typescript', '.tsx': 'typescript', '.js': 'javascript', '.jsx': 'javascript',
   '.json': 'json', '.md': 'markdown', '.html': 'html', '.css': 'css', '.scss': 'scss',
   '.yaml': 'yaml', '.yml': 'yaml', '.py': 'python', '.go': 'go', '.rs': 'rust',

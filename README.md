@@ -58,6 +58,7 @@ The daemon adheres strictly to the **SpecFlow Agent Protocol (v1)**:
 - **Structured Output & 1-Turn Repair**: Stages bare JSON schemas for `--output-schema` and performs automatic 1-turn repair if structured responses contain invalid formatting.
 - **Streaming NDJSON**: Relays real-time `text`, `reasoning`, `tool_call`, and `tool_result` events.
 - **Cost & Token Accounting**: Extracts micro-dollar costs (`done.usage.cost`) and token counts with 6-decimal precision.
+- **Codebase Inspection**: Services the `project:inspect_codebase` control query, returning a bounded briefing of curated root-level manifests, configs, and sample source snippets so the cloud orchestrator can understand a local repo without spawning an agent.
 
 ## Development
 

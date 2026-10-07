@@ -14,6 +14,7 @@ import { executeClaimedTask } from './runner.js'
 import { HttpWorkerStore } from './store.js'
 import { discoverLocalManifest, probeCapabilities, probeModels } from './discovery.js'
 import * as git from './git/utils.js'
+import { inspectCodebase } from './project.js'
 
 // ---------------------------------------------------------------------------
 // Constants
@@ -597,6 +598,30 @@ async function runDaemon(): Promise<void> {
           }
         } catch (err: any) {
           console.warn(`[worker] fs action "${ctrl.action}" failed:`, err?.message || String(err))
+          await client.sendQueryResponse(queryId, null, err?.message || String(err)).catch(() => {})
+        }
+      })
+      return
+    }
+
+    if (ctrl.action.startsWith('project:')) {
+      const queryId = ctrl.queryId
+      if (!queryId) return
+
+      Promise.resolve().then(async () => {
+        try {
+          if (ctrl.action === 'project:inspect_codebase') {
+            const result = await inspectCodebase({
+              dir: ctrl.dir as string,
+              maxBytes: ctrl.maxBytes,
+              maxSnippets: ctrl.maxSnippets,
+            })
+            await client.sendQueryResponse(queryId, result)
+          } else {
+            await client.sendQueryResponse(queryId, null, `Unknown project action: ${ctrl.action}`)
+          }
+        } catch (err: any) {
+          console.warn(`[worker] project action "${ctrl.action}" failed:`, err?.message || String(err))
           await client.sendQueryResponse(queryId, null, err?.message || String(err)).catch(() => {})
         }
       })
