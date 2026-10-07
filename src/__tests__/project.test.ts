@@ -4,10 +4,14 @@
  * Scaffolding mirrors src/__tests__/git-utils.test.ts (mkdtemp per test,
  * recursive-force cleanup). Hermetic by construction: every fixture lives
  * inside the mkdtemp dir; the daemon subprocess only ever talks to a fake
- * orchestrator on localhost, and no git command or provider is involved.
+ * orchestrator on localhost, and no git command or provider is involved. Tier 4
+ * is the deliberate exception: it runs read-only `git` queries against this
+ * checkout plus `git init` inside throwaway scratch repos under the temp dir.
  *
- * Three tiers deliberately share this one file, because spec §3.4 mandates
- * src/__tests__/project.test.ts as the only test artifact of this feature:
+ * Four tiers deliberately share this one file, because spec §3.4 mandates
+ * src/__tests__/project.test.ts as the only test artifact of this feature (the
+ * fix-review acceptance criterion also confines the branch diff to a fixed file
+ * list, so the repo-hygiene guard for `.agent-state/` lives here too):
  *  1. `inspectCodebase()` contract tests (src/project.ts, unit).
  *  2. Boundary / edge-case tests, including CHARACTERIZATION pins that lock in
  *     today's behaviour for awkward inputs an orchestrator can actually send.
@@ -24,9 +28,13 @@
  *     Tier 3 needs to bind a loopback port and spawn `bun src/cli.ts start`; if
  *     that is ever impossible in a CI sandbox, tier 3 is the section to gate off
  *     — tiers 1 and 2 stay pure-filesystem and hermetic.
+ *  4. Repository hygiene: the review/test machinery persists oversized tool results
+ *     under `.agent-state/tool-results/`, and an add-all sweep used to commit them
+ *     into the feature diff. Tier 4 pins the `.gitignore` rule that stops that
+ *     recurrence, and skips itself when no usable `git` binary is available.
  */
 import { describe, it, expect, beforeEach, afterEach, beforeAll, afterAll } from 'bun:test'
-import { mkdtemp, mkdir, rm, writeFile, chmod, symlink } from 'node:fs/promises'
+import { mkdtemp, mkdir, rm, writeFile, readFile, chmod, symlink } from 'node:fs/promises'
 import { tmpdir } from 'node:os'
 import path from 'node:path'
 import {
@@ -1424,4 +1432,128 @@ describe('project:inspect_codebase dispatch (real handleControl over SSE)', () =
       snippets: [],
     })
   }, RESPONSE_TIMEOUT_MS + 5_000)
+})
+
+// ---------------------------------------------------------------------------
+// Tier 4 - repository hygiene: `.agent-state/` review-machinery transcripts
+// must never reach a commit, and therefore never reappear in a feature diff.
+// ---------------------------------------------------------------------------
+
+/** Checkout root, resolved from this file's location (src/__tests__/../../). */
+const REPO_ROOT = path.join(import.meta.dir, '..', '..')
+
+/** A path shaped like the persisted tool-result transcripts that used to leak. */
+const TRANSCRIPT_PATH = '.agent-state/tool-results/call_deadbeefcafebabe0123456789.txt'
+
+interface GitResult {
+  code: number
+  stdout: string
+  stderr: string
+}
+
+/** Run `git` without ever throwing; code -1 means it could not be spawned. */
+async function runGit(args: string[], cwd: string): Promise<GitResult> {
+  try {
+    const proc = Bun.spawn(['git', ...args], { cwd, stdout: 'pipe', stderr: 'pipe' })
+    const stdout = await new Response(proc.stdout).text()
+    const stderr = await new Response(proc.stderr).text()
+    return { code: await proc.exited, stdout, stderr }
+  } catch {
+    return { code: -1, stdout: '', stderr: 'git could not be spawned' }
+  }
+}
+
+/** Split newline-delimited git output into trimmed, non-empty entries. */
+function gitLines(output: string): string[] {
+  return output
+    .split('\n')
+    .map((line) => line.trim())
+    .filter((line) => line.length > 0)
+}
+
+async function gitIsUsable(cwd: string): Promise<boolean> {
+  return (await runGit(['--version'], cwd)).code === 0
+}
+
+describe('project/agent-state hygiene (.agent-state/ excluded from commits)', () => {
+  let repoDir = ''
+
+  beforeEach(async () => {
+    repoDir = await mkdtemp(path.join(tmpdir(), 'specflow-worker-agent-state-test-'))
+  })
+
+  afterEach(async () => {
+    await rm(repoDir, { recursive: true, force: true })
+  })
+
+  it('declares .agent-state/ in the repository .gitignore', async () => {
+    const raw = await readFile(path.join(REPO_ROOT, '.gitignore'), 'utf8')
+    const rules = gitLines(raw).filter((line) => !line.startsWith('#'))
+
+    // A directory rule, so the whole tool-results subtree is covered and the
+    // assertion cannot be satisfied by a narrower one-off glob.
+    expect(rules).toContain('.agent-state/')
+    expect(rules).not.toContain('.agent-state/*.txt')
+  })
+
+  it('is honoured by git inside this checkout', async () => {
+    if (!(await gitIsUsable(REPO_ROOT))) return
+
+    // `git check-ignore` exits 0 only when the path is ignored AND untracked:
+    // this is exactly the diagnostic that reported failure in the review.
+    const ignored = await runGit(['check-ignore', '-q', '--', TRANSCRIPT_PATH], REPO_ROOT)
+    if (ignored.code === 128) return
+    expect(ignored.code).toBe(0)
+
+    // Control: the rule is scoped to agent state rather than "everything is
+    // ignored", which would make the assertion above vacuous.
+    const source = await runGit(['check-ignore', '-q', '--', 'src/project.ts'], REPO_ROOT)
+    expect(source.code).toBe(1)
+  })
+
+  it('keeps transcripts out of what an add-all sweep stages', async () => {
+    if (!(await gitIsUsable(REPO_ROOT))) return
+
+    const gitignoreRaw = await readFile(path.join(REPO_ROOT, '.gitignore'), 'utf8')
+    await runGit(['init', '-q'], repoDir)
+    await runGit(['config', 'user.email', 'test@test.com'], repoDir)
+    await runGit(['config', 'user.name', 'Test'], repoDir)
+    const seeded = await runGit(['commit', '--allow-empty', '-q', '-m', 'init'], repoDir)
+    if (seeded.code !== 0) return
+
+    // Replay this repository's real ignore rules in a scratch checkout, then drop
+    // in exactly the two kinds of file a verification run produces.
+    await writeFile(path.join(repoDir, '.gitignore'), gitignoreRaw, 'utf8')
+    await writeFixture(repoDir, TRANSCRIPT_PATH, 'tool-result transcript\n')
+    await writeFixture(repoDir, 'src/index.ts', 'export const x = 1\n')
+
+    const added = await runGit(['add', '-A'], repoDir)
+    expect(added.code).toBe(0)
+
+    const staged = gitLines((await runGit(['diff', '--cached', '--name-only'], repoDir)).stdout)
+    // Control: the sweep really does stage the work that belongs in a diff.
+    expect(staged).toContain('src/index.ts')
+    // The transcript must be invisible to the sweep, so it can never re-infect a
+    // branch diff again.
+    expect(staged.filter((p) => p.startsWith('.agent-state/'))).toEqual([])
+
+    // ...and it is ignored, not merely untracked-and-one-`git add`-away.
+    const status = gitLines((await runGit(['status', '--porcelain', '--untracked-files=all'], repoDir)).stdout)
+    expect(status.filter((line) => line.includes('.agent-state/'))).toEqual([])
+  })
+
+  it('leaves no addable transcript sitting in the real working tree', async () => {
+    if (!(await gitIsUsable(REPO_ROOT))) return
+
+    const status = await runGit(
+      ['status', '--porcelain', '--untracked-files=all', '--', '.agent-state'],
+      REPO_ROOT,
+    )
+    if (status.code === 128) return
+    expect(status.code).toBe(0)
+
+    // Untracked (`??`) entries under .agent-state/ are what an add-all sweep
+    // would fold into the next commit; ignored files never show up there.
+    expect(gitLines(status.stdout).filter((line) => line.startsWith('??'))).toEqual([])
+  })
 })
