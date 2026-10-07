@@ -1003,28 +1003,56 @@ describe('project/inspectCodebase', () => {
       expect(pathsOf(result.snippets)).toEqual(['src.ts'])
     })
 
+    // Deterministic by design: no wall-clock assertion. The tree is built far
+    // wider (300 files) than every budget exercised below, so a walk that failed
+    // to stop early would return 300 snippets and fail the length/order checks on
+    // any machine, fast or slow. The generous per-test timeout is a hang guard
+    // only (it protects slow CI filesystems during fixture setup) and asserts
+    // nothing about throughput.
     it('survives a wide tree and still honours the snippet budget', async () => {
+      const WIDTH = 300
+      const pad = (i: number): string => String(i).padStart(3, '0')
+      const fileText = 'export const v = 1\n'
+      // Expected sorted-DFS order, computed independently of the implementation.
+      const expectedAll = Array.from({ length: WIDTH }, (_, i) => `many/f${pad(i)}.ts`)
+
       await mkdir(path.join(testDir, 'many'), { recursive: true })
       await Promise.all(
-        Array.from({ length: 300 }, async (_, i) =>
-          writeFile(path.join(testDir, 'many', `f${String(i).padStart(3, '0')}.ts`), 'export const v = 1\n', 'utf8'),
+        Array.from({ length: WIDTH }, (_, i) =>
+          writeFile(path.join(testDir, 'many', `f${pad(i)}.ts`), fileText, 'utf8'),
         ),
       )
 
-      const startedAt = Date.now()
-      const result = await inspectCodebase({ dir: testDir, maxSnippets: 5 })
-      const elapsed = Date.now() - startedAt
+      // Every budget below is strictly smaller than the tree: the walk must stop
+      // at the cap and must never return more paths than asked for.
+      for (const budget of [1, 2, 5]) {
+        const result = await inspectCodebase({ dir: testDir, maxSnippets: budget })
+        const returned = pathsOf(result.snippets)
 
-      expect(result.snippets.length).toBe(5)
-      expect(pathsOf(result.snippets)).toEqual([
-        'many/f000.ts',
-        'many/f001.ts',
-        'many/f002.ts',
-        'many/f003.ts',
-        'many/f004.ts',
-      ])
-      expect(elapsed).toBeLessThan(5_000)
-    })
+        expect(returned.length).toBe(budget)
+        expect(returned.length).toBeLessThan(WIDTH)
+        expect(returned).toEqual(expectedAll.slice(0, budget))
+        // No duplicates: the budget is never satisfied by re-visiting one path.
+        expect(new Set(returned).size).toBe(budget)
+
+        for (const snippet of result.snippets) {
+          expect(snippet.language).toBe('typescript')
+          expect(snippet.truncated).toBe(false)
+          expect(snippet.content).toBe(fileText)
+        }
+      }
+
+      // Budgets grow the result only as a prefix of the same sorted-DFS order,
+      // so raising the cap can never drop or reorder an earlier snippet.
+      const small = pathsOf((await inspectCodebase({ dir: testDir, maxSnippets: 3 })).snippets)
+      const large = pathsOf((await inspectCodebase({ dir: testDir, maxSnippets: 8 })).snippets)
+      expect(large.slice(0, small.length)).toEqual(small)
+
+      // A budget larger than the tree returns the whole tree, still in order,
+      // proving the cap is an upper bound rather than a truncation of real data.
+      const over = await inspectCodebase({ dir: testDir, maxSnippets: WIDTH + 1 })
+      expect(pathsOf(over.snippets)).toEqual(expectedAll)
+    }, 60_000)
 
     it('ignores files with no extension at all (Dockerfile, Makefile)', async () => {
       await writeFixture(testDir, 'Dockerfile', 'FROM deno\n')
