@@ -6,10 +6,12 @@
  */
 
 import path from 'node:path'
-import { loadConfig, saveWorkerEnv, type WorkerConfig } from './config.js'
+import { loadConfig, saveWorkerEnv } from './config.js'
+import type { WorkerConfig } from './config.js'
 import { SpecflowClient } from './client.js'
 import { Presence } from './presence.js'
-import { subscribeToControl, type ClaimedTask } from './queue.js'
+import { subscribeToControl } from './queue.js'
+import type { ClaimedTask, ControlMessage } from './queue.js'
 import { executeClaimedTask } from './runner.js'
 import { HttpWorkerStore } from './store.js'
 import { discoverLocalManifest, probeCapabilities, probeModels } from './discovery.js'
@@ -249,10 +251,12 @@ async function runDaemon(): Promise<void> {
   console.log(`[worker] registered: worker_id=${workerId}`)
 
   const pending = new Set<string>()
-  const taskPayloads = new Map<string, { task: any; runId?: string }>()
+  const taskPayloads = new Map<string, { task: Record<string, unknown>; runId?: string }>()
   interface ActiveTaskInfo {
     taskId: string
+    taskSlug?: string
     featureId: string
+    featureName?: string
     controller: AbortController
     promise: Promise<unknown>
   }
@@ -276,10 +280,15 @@ async function runDaemon(): Promise<void> {
       taskPayloads.delete(taskId)
       if (!payload || !payload.task) continue
 
+      const taskRecord = payload.task
+      const taskIdFromPayload = (taskRecord.task_id || taskRecord.id) as string | undefined
+      const featIdFromPayload = (taskRecord.featureId || taskRecord.feature) as string | undefined
+      const featNameFromPayload = (taskRecord.feature_name || taskRecord.featureName || taskRecord.feature) as string | undefined
+
       const claimed: ClaimedTask = {
         id: taskId,
-        featureId: payload.task.feature || payload.task.featureId || '',
-        record: payload.task,
+        featureId: featIdFromPayload || '',
+        record: taskRecord,
         runId: payload.runId,
       }
 
@@ -309,19 +318,21 @@ async function runDaemon(): Promise<void> {
 
       activeTasks.set(claimed.id, {
         taskId: claimed.id,
+        taskSlug: taskIdFromPayload,
         featureId: claimed.featureId,
+        featureName: featNameFromPayload,
         controller: taskController,
         promise,
       })
     }
   }
 
-  function handleControl(ctrl: { action: string; task_id?: string; taskId?: string; feature?: string; queryId?: string; command?: string; [key: string]: any }): void {
+  function handleControl(ctrl: ControlMessage): void {
     if (ctrl.action === 'run_task') {
       const taskId = (ctrl.taskId || ctrl.task_id) as string | undefined
       if (taskId && ctrl.task) {
         console.log(`[worker] received run_task command for task "${taskId}"`)
-        taskPayloads.set(taskId, { task: ctrl.task, runId: ctrl.runId })
+        taskPayloads.set(taskId, { task: ctrl.task as Record<string, unknown>, runId: ctrl.runId as string | undefined })
         pending.add(taskId)
         pump().catch(() => {})
       }
@@ -331,7 +342,7 @@ async function runDaemon(): Promise<void> {
     if (ctrl.action === 'chat_step') {
       const taskId = (ctrl.taskId || ctrl.task_id || `chat_${Date.now()}`) as string
       console.log(`[worker] received chat_step command for task "${taskId}"`)
-      const taskRecord = ctrl.task || {
+      const taskRecord = (ctrl.task as Record<string, unknown> | undefined) || {
         prompt: ctrl.prompt,
         role: 'colleague',
         task_type: 'chat_step',
@@ -344,9 +355,9 @@ async function runDaemon(): Promise<void> {
       }
       const claimed: ClaimedTask = {
         id: taskId,
-        featureId: ctrl.featureId || ctrl.feature || '',
+        featureId: (ctrl.featureId || ctrl.feature_id || ctrl.feature || '') as string,
         record: taskRecord,
-        runId: ctrl.runId,
+        runId: ctrl.runId as string | undefined,
         isChat: true,
       }
 
@@ -375,7 +386,9 @@ async function runDaemon(): Promise<void> {
 
       activeChatTask = {
         taskId,
+        taskSlug: (ctrl.task_id || ctrl.taskId || taskId) as string,
         featureId: claimed.featureId,
+        featureName: (ctrl.feature_name || ctrl.featureName || ctrl.feature) as string | undefined,
         controller: taskController,
         promise,
       }
@@ -422,7 +435,7 @@ async function runDaemon(): Promise<void> {
             if (!isRepo) {
               await client.sendQueryResponse(queryId, { error: null })
             } else {
-              const exists = await git.branchExists(dir, ctrl.branch)
+              const exists = ctrl.branch ? await git.branchExists(dir, ctrl.branch) : false
               if (!exists) {
                 await client.sendQueryResponse(queryId, { error: null })
               } else {
@@ -439,7 +452,9 @@ async function runDaemon(): Promise<void> {
                 } else {
                   try {
                     console.log(`[worker] rebasing '${ctrl.branch}' onto main before phase`)
-                    await git.rebaseBranch(dir, ctrl.branch)
+                    if (ctrl.branch) {
+                      await git.rebaseBranch(dir, ctrl.branch)
+                    }
                     await client.sendQueryResponse(queryId, { error: null })
                   } catch (err: any) {
                     await client.sendQueryResponse(queryId, {
@@ -454,7 +469,7 @@ async function runDaemon(): Promise<void> {
             if (!isRepo) {
               await client.sendQueryResponse(queryId, { committed: false })
             } else {
-              const committed = await git.commitChanges(dir, ctrl.message)
+              const committed = await git.commitChanges(dir, ctrl.message || '')
               await client.sendQueryResponse(queryId, { committed })
             }
           } else if (ctrl.action === 'git:get_changed_files') {
@@ -470,7 +485,7 @@ async function runDaemon(): Promise<void> {
             if (!isRepo) {
               await client.sendQueryResponse(queryId, { diff: null })
             } else {
-              const diff = await git.getBoundedDiff(dir, ctrl.branch, ctrl.maxDiffChars)
+              const diff = await git.getBoundedDiff(dir, ctrl.branch || null, ctrl.maxDiffChars)
               await client.sendQueryResponse(queryId, { diff })
             }
           } else if (ctrl.action === 'git:get_file_diff') {
@@ -478,7 +493,7 @@ async function runDaemon(): Promise<void> {
             if (!isRepo) {
               await client.sendQueryResponse(queryId, { error: 'Not a git repo' })
             } else {
-              const fileDiff = await git.getFileDiff(dir, ctrl.filepath, ctrl.branch)
+              const fileDiff = await git.getFileDiff(dir, ctrl.filepath || '', ctrl.branch || 'HEAD')
               await client.sendQueryResponse(queryId, { diff: fileDiff })
             }
           } else if (ctrl.action === 'git:finalize') {
@@ -488,10 +503,17 @@ async function runDaemon(): Promise<void> {
             } else {
               let prUrl: string | null = null
               if (await git.hasRemote(dir)) {
-                console.log(`[worker] pushing branch "${ctrl.branch}"`)
-                await git.pushBranch(dir, ctrl.branch)
-                console.log(`[worker] creating PR for "${ctrl.featureName}"`)
-                prUrl = await git.createPullRequest(dir, ctrl.featureName, ctrl.description, ctrl.branch)
+                if (ctrl.branch) {
+                  console.log(`[worker] pushing branch "${ctrl.branch}"`)
+                  await git.pushBranch(dir, ctrl.branch)
+                }
+                console.log(`[worker] creating PR for "${ctrl.featureName || 'feature'}"`)
+                prUrl = await git.createPullRequest(
+                  dir,
+                  ctrl.featureName || 'Feature',
+                  ctrl.description || '',
+                  ctrl.branch || '',
+                )
               }
               await client.sendQueryResponse(queryId, { prUrl })
             }
@@ -629,19 +651,49 @@ async function runDaemon(): Promise<void> {
     }
 
     if (ctrl.action === 'stop' || ctrl.action === 'cancel') {
-      const targetTaskId = ctrl.taskId || ctrl.task_id
-      const targetFeature = ctrl.feature
-      console.log(`[worker] received control stop: taskId=${targetTaskId || '*'} feature=${targetFeature || '*'}`)
+      const targetTaskId = (ctrl.taskId || ctrl.task_id) as string | undefined
+      const targetFeatureId = (ctrl.featureId || ctrl.feature_id) as string | undefined
+      const targetFeature = (ctrl.feature || ctrl.featureName || targetFeatureId) as string | undefined
+      console.log(
+        `[worker] received control stop: taskId=${targetTaskId || '*'} featureId=${targetFeatureId || '*'} feature=${(ctrl.feature as string | undefined) || '*'}`
+      )
 
-      if (!targetTaskId && !targetFeature && !ctrl.all) {
-        console.warn(`[worker] stop command ignored: neither taskId nor feature specified`)
+      if (!targetTaskId && !targetFeatureId && !ctrl.feature && !ctrl.all) {
+        console.warn(`[worker] stop command ignored: neither taskId nor feature/featureId specified`)
         return
       }
 
       let stoppedCount = 0
+
+      for (const [id, payload] of taskPayloads.entries()) {
+        const payloadTaskId = payload.task.task_id as string | undefined
+        const payloadTaskDbId = payload.task.id as string | undefined
+        const matchesTask = targetTaskId
+          ? (id === targetTaskId || payloadTaskId === targetTaskId || payloadTaskDbId === targetTaskId)
+          : true
+        const featId = (payload.task.featureId || payload.task.feature) as string | undefined
+        const featName = (payload.task.feature_name || payload.task.featureName || payload.task.feature) as string | undefined
+        const matchesFeature = (targetFeatureId || targetFeature)
+          ? (featId === targetFeatureId || featId === targetFeature || featName === targetFeature || featName === targetFeatureId)
+          : true
+
+        if (matchesTask && matchesFeature) {
+          console.log(`[worker] cancelling pending task "${id}" before execution`)
+          taskPayloads.delete(id)
+          pending.delete(id)
+          stoppedCount++
+        }
+      }
+
       for (const [id, taskInfo] of activeTasks.entries()) {
-        const matchesTask = targetTaskId ? (id === targetTaskId || taskInfo.taskId === targetTaskId) : true
-        const matchesFeature = targetFeature ? (taskInfo.featureId === targetFeature) : true
+        const matchesTask = targetTaskId
+          ? (id === targetTaskId || taskInfo.taskId === targetTaskId || taskInfo.taskSlug === targetTaskId)
+          : true
+        const matchesFeature = (targetFeatureId || targetFeature)
+          ? (taskInfo.featureId === targetFeatureId ||
+             taskInfo.featureId === targetFeature ||
+             (taskInfo.featureName !== undefined && (taskInfo.featureName === targetFeature || taskInfo.featureName === targetFeatureId)))
+          : true
 
         if (matchesTask && matchesFeature) {
           console.log(`[worker] aborting active task "${id}" (feature: "${taskInfo.featureId}")`)
@@ -649,9 +701,16 @@ async function runDaemon(): Promise<void> {
           stoppedCount++
         }
       }
+
       if (activeChatTask) {
-        const matchesTask = targetTaskId ? (activeChatTask.taskId === targetTaskId) : true
-        const matchesFeature = targetFeature ? (activeChatTask.featureId === targetFeature) : true
+        const matchesTask = targetTaskId
+          ? (activeChatTask.taskId === targetTaskId || activeChatTask.taskSlug === targetTaskId)
+          : true
+        const matchesFeature = (targetFeatureId || targetFeature)
+          ? (activeChatTask.featureId === targetFeatureId ||
+             activeChatTask.featureId === targetFeature ||
+             (activeChatTask.featureName !== undefined && (activeChatTask.featureName === targetFeature || activeChatTask.featureName === targetFeatureId)))
+          : true
         if (matchesTask && matchesFeature) {
           console.log(`[worker] aborting active chat task "${activeChatTask.taskId}"`)
           activeChatTask.controller.abort()
