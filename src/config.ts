@@ -22,6 +22,7 @@ export interface WorkerConfig {
 }
 
 const DEFAULT_SPECFLOW_URL = 'http://127.0.0.1:3200'
+export const DEFAULT_WORKER_CONCURRENCY = 4
 
 /**
  * Parse a raw `KEY=VALUE` text block into a flat record.
@@ -100,7 +101,7 @@ export function resolveConfig(
 
   const rawConcurrency = env.SPECFLOW_WORKER_CONCURRENCY ?? file.SPECFLOW_WORKER_CONCURRENCY
   const parsedConcurrency = rawConcurrency ? parseInt(rawConcurrency, 10) : undefined
-  const concurrency = parsedConcurrency && !isNaN(parsedConcurrency) && parsedConcurrency > 0 ? parsedConcurrency : 1
+  const concurrency = parsedConcurrency && !isNaN(parsedConcurrency) && parsedConcurrency > 0 ? parsedConcurrency : DEFAULT_WORKER_CONCURRENCY
 
   return {
     specflowUrl,

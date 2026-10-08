@@ -67,17 +67,42 @@ export async function discardWorkingChanges(dir: string): Promise<void> {
   }
 }
 
+const dirCommitLocks = new Map<string, Promise<void>>()
+
 export async function commitChanges(dir: string, message: string): Promise<boolean> {
+  const prevLock = dirCommitLocks.get(dir) || Promise.resolve()
+  let releaseLock: () => void = () => {}
+  const currentLock = new Promise<void>((resolve) => {
+    releaseLock = resolve
+  })
+  dirCommitLocks.set(dir, currentLock)
+
+  await prevLock.catch(() => {})
   try {
-    const status = (await Bun.$`git -C ${dir} status --porcelain`.text()).trim()
-    if (!status) return false
-    await Bun.$`git -C ${dir} add -A`.text()
-    await Bun.$`git -C ${dir} commit -m ${message}`.text()
-    console.log(`[git] committed changes in '${dir}': ${message}`)
-    return true
-  } catch (err) {
-    console.warn(`[git] commit failed: ${(err as Error).message}`)
+    for (let attempt = 1; attempt <= 3; attempt++) {
+      try {
+        const status = (await Bun.$`git -C ${dir} status --porcelain`.text()).trim()
+        if (!status) return false
+        await Bun.$`git -C ${dir} add -A`.text()
+        await Bun.$`git -C ${dir} commit -m ${message}`.text()
+        console.log(`[git] committed changes in '${dir}': ${message}`)
+        return true
+      } catch (err: any) {
+        const errMsg = (err as Error)?.message || String(err)
+        if (attempt < 3 && errMsg.includes('.git/index.lock')) {
+          await new Promise((r) => setTimeout(r, 200 * attempt))
+          continue
+        }
+        console.warn(`[git] commit failed: ${errMsg}`)
+        return false
+      }
+    }
     return false
+  } finally {
+    releaseLock()
+    if (dirCommitLocks.get(dir) === currentLock) {
+      dirCommitLocks.delete(dir)
+    }
   }
 }
 

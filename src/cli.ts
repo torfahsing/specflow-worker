@@ -6,7 +6,7 @@
  */
 
 import path from 'node:path'
-import { loadConfig, saveWorkerEnv } from './config.js'
+import { loadConfig, saveWorkerEnv, DEFAULT_WORKER_CONCURRENCY } from './config.js'
 import type { WorkerConfig } from './config.js'
 import { SpecflowClient } from './client.js'
 import { Presence } from './presence.js'
@@ -262,7 +262,7 @@ async function runDaemon(): Promise<void> {
   }
   const activeTasks = new Map<string, ActiveTaskInfo>()
   let activeChatTask: ActiveTaskInfo | null = null
-  const concurrency = config.concurrency ?? 1
+  const concurrency = config.concurrency ?? DEFAULT_WORKER_CONCURRENCY
   let shuttingDown = false
   let unsub: (() => Promise<void>) | null = null
 
