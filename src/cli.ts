@@ -16,7 +16,7 @@ import { executeClaimedTask } from './runner.js'
 import { HttpWorkerStore } from './store.js'
 import { discoverLocalManifest, probeCapabilities, probeModels } from './discovery.js'
 import * as git from './git/utils.js'
-import { inspectCodebase } from './project.js'
+import { inspectCodebase, runVerification } from './project.js'
 
 // ---------------------------------------------------------------------------
 // Constants
@@ -637,6 +637,13 @@ async function runDaemon(): Promise<void> {
               dir: ctrl.dir as string,
               maxBytes: ctrl.maxBytes,
               maxSnippets: ctrl.maxSnippets,
+            })
+            await client.sendQueryResponse(queryId, result)
+          } else if (ctrl.action === 'project:run_verification') {
+            const result = await runVerification({
+              dir: ctrl.dir as string,
+              command: ctrl.command as string | undefined,
+              timeoutMs: ctrl.timeoutMs as number | undefined,
             })
             await client.sendQueryResponse(queryId, result)
           } else {

@@ -187,3 +187,115 @@ export async function inspectCodebase(input: InspectCodebaseInput): Promise<Insp
 
   return { dir, manifests, configs, snippets }
 }
+
+export interface RunVerificationInput {
+  dir: string
+  command?: string
+  timeoutMs?: number
+}
+
+export interface RunVerificationResult {
+  passed: boolean
+  command: string
+  exitCode: number
+  output: string
+}
+
+/**
+ * Deterministically run build/test verification for a project directory.
+ * If command is not specified, autodetects from package.json scripts (test, build).
+ */
+export async function runVerification(input: RunVerificationInput): Promise<RunVerificationResult> {
+  const dir = input.dir || ''
+  if (!dir) {
+    return { passed: false, command: '', exitCode: 1, output: 'No project directory provided' }
+  }
+
+  let command = input.command?.trim()
+  if (!command) {
+    // Autodetect from package.json
+    try {
+      const pkgJsonPath = path.join(dir, 'package.json')
+      const file = Bun.file(pkgJsonPath)
+      if (await file.exists()) {
+        const pkg = await file.json()
+        const scripts = pkg.scripts || {}
+        const parts: string[] = []
+        if (scripts.build) parts.push('npm run build')
+        if (scripts.test) parts.push('npm test')
+        if (parts.length > 0) {
+          command = parts.join(' && ')
+        }
+      }
+    } catch {}
+  }
+
+  // If still no command detected, look for Makefile or Cargo.toml or pyproject.toml
+  if (!command) {
+    try {
+      if (await Bun.file(path.join(dir, 'Cargo.toml')).exists()) {
+        command = 'cargo test'
+      } else if (await Bun.file(path.join(dir, 'Makefile')).exists()) {
+        command = 'make test'
+      } else if (await Bun.file(path.join(dir, 'pyproject.toml')).exists()) {
+        command = 'pytest'
+      }
+    } catch {}
+  }
+
+  if (!command) {
+    // No verification command discovered — pass automatically
+    return { passed: true, command: 'none', exitCode: 0, output: 'No test/build script found to verify' }
+  }
+
+  try {
+    const timeout = input.timeoutMs || 180_000 // 3 minutes timeout default
+    const proc = Bun.spawn(['sh', '-c', command], {
+      cwd: dir,
+      stdout: 'pipe',
+      stderr: 'pipe',
+      env: { ...process.env, CI: '1', NODE_ENV: 'test' },
+    })
+
+    const timeoutPromise = new Promise<{ passed: boolean; command: string; exitCode: number; output: string }>((resolve) => {
+      setTimeout(() => {
+        try { proc.kill() } catch {}
+        resolve({
+          passed: false,
+          command: command!,
+          exitCode: 124,
+          output: `Verification command timed out after ${Math.round(timeout / 1000)}s: ${command}`,
+        })
+      }, timeout)
+    })
+
+    const execPromise = (async () => {
+      const [stdoutText, stderrText] = await Promise.all([
+        new Response(proc.stdout).text(),
+        new Response(proc.stderr).text(),
+      ])
+      const exitCode = await proc.exited
+      const combined = [stdoutText, stderrText].filter(Boolean).join('\n').trim()
+      // Cap output size to avoid memory explosion (e.g. 50k chars)
+      const output = combined.length > 50_000
+        ? combined.slice(0, 10_000) + '\n\n...[truncated]...\n\n' + combined.slice(-40_000)
+        : combined
+
+      return {
+        passed: exitCode === 0,
+        command: command!,
+        exitCode,
+        output,
+      }
+    })()
+
+    return await Promise.race([execPromise, timeoutPromise])
+  } catch (err: any) {
+    return {
+      passed: false,
+      command: command || '',
+      exitCode: 1,
+      output: `Failed to execute verification: ${err?.message || String(err)}`,
+    }
+  }
+}
