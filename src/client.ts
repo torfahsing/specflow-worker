@@ -136,6 +136,7 @@ export class SpecflowClient {
     let closed = false;
     let currentController: AbortController | null = null;
     let reconnectDelay = 1000;
+    let wasDisconnected = false;
 
     const connect = async () => {
       if (closed) return;
@@ -156,6 +157,11 @@ export class SpecflowClient {
         }
 
         reconnectDelay = 1000; // Reset backoff on successful connection
+        if (wasDisconnected) {
+          console.log('[worker] SSE stream connection restored');
+          wasDisconnected = false;
+        }
+
         const reader = res.body?.getReader();
         if (!reader) {
           throw new Error('Response body has no readable stream reader');
@@ -197,7 +203,10 @@ export class SpecflowClient {
         }
       } catch (err: any) {
         if (!closed) {
-          onError?.(err);
+          if (!wasDisconnected) {
+            onError?.(err);
+            wasDisconnected = true;
+          }
         }
       } finally {
         if (!closed) {

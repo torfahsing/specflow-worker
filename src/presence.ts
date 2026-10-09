@@ -20,6 +20,8 @@ export class Presence {
   private timer: ReturnType<typeof setInterval> | null = null
   private stopped = false
 
+  private lastErrorLogged: string | null = null
+
   constructor(
     private client: SpecflowClient,
     private workerName: string,
@@ -37,9 +39,14 @@ export class Presence {
         capabilities: this.capabilities,
       })
       this.workerId = res.worker_id
+      this.lastErrorLogged = null
       return res.worker_id
     } catch (err: any) {
-      console.warn('[worker] presence notice:', err?.message || String(err))
+      const errMsg = err?.message || String(err)
+      if (this.lastErrorLogged !== errMsg) {
+        console.warn('[worker] presence notice:', errMsg)
+        this.lastErrorLogged = errMsg
+      }
       return ''
     }
   }
@@ -81,8 +88,16 @@ export class Presence {
       if (res?.worker_id) {
         this.workerId = res.worker_id
       }
+      if (this.lastErrorLogged !== null) {
+        console.log('[worker] presence connection restored')
+        this.lastErrorLogged = null
+      }
     } catch (err: any) {
-      console.warn('[worker] presence notice:', err?.message || String(err))
+      const errMsg = err?.message || String(err)
+      if (this.lastErrorLogged !== errMsg) {
+        console.warn('[worker] presence notice:', errMsg)
+        this.lastErrorLogged = errMsg
+      }
     }
   }
 }
