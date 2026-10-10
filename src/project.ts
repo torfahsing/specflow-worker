@@ -192,6 +192,7 @@ export interface RunVerificationInput {
   dir: string
   command?: string
   timeoutMs?: number
+  onSpawn?: (proc: { kill: (signal?: any) => void }) => void
 }
 
 export interface RunVerificationResult {
@@ -249,25 +250,29 @@ export async function runVerification(input: RunVerificationInput): Promise<RunV
   }
 
   try {
-    const timeout = input.timeoutMs || 180_000 // 3 minutes timeout default
     const proc = Bun.spawn(['sh', '-c', command], {
       cwd: dir,
       stdout: 'pipe',
       stderr: 'pipe',
       env: { ...process.env, CI: '1', NODE_ENV: 'test' },
     })
+    input.onSpawn?.(proc)
 
-    const timeoutPromise = new Promise<{ passed: boolean; command: string; exitCode: number; output: string }>((resolve) => {
-      setTimeout(() => {
-        try { proc.kill() } catch {}
-        resolve({
-          passed: false,
-          command: command!,
-          exitCode: 124,
-          output: `Verification command timed out after ${Math.round(timeout / 1000)}s: ${command}`,
-        })
-      }, timeout)
-    })
+    let timeoutPromise: Promise<{ passed: boolean; command: string; exitCode: number; output: string }> | null = null
+    if (typeof input.timeoutMs === 'number' && input.timeoutMs > 0) {
+      const timeout = input.timeoutMs
+      timeoutPromise = new Promise<{ passed: boolean; command: string; exitCode: number; output: string }>((resolve) => {
+        setTimeout(() => {
+          try { proc.kill() } catch {}
+          resolve({
+            passed: false,
+            command: command!,
+            exitCode: 124,
+            output: `Verification command timed out after ${Math.round(timeout / 1000)}s: ${command}`,
+          })
+        }, timeout)
+      })
+    }
 
     const execPromise = (async () => {
       const [stdoutText, stderrText] = await Promise.all([
@@ -289,7 +294,7 @@ export async function runVerification(input: RunVerificationInput): Promise<RunV
       }
     })()
 
-    return await Promise.race([execPromise, timeoutPromise])
+    return timeoutPromise ? await Promise.race([execPromise, timeoutPromise]) : await execPromise
   } catch (err: any) {
     return {
       passed: false,

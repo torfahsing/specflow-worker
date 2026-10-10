@@ -262,6 +262,7 @@ async function runDaemon(): Promise<void> {
   }
   const activeTasks = new Map<string, ActiveTaskInfo>()
   let activeChatTask: ActiveTaskInfo | null = null
+  const activeQueries = new Map<string, { abort: () => void }>()
   const concurrency = config.concurrency ?? DEFAULT_WORKER_CONCURRENCY
   let shuttingDown = false
   let unsub: (() => Promise<void>) | null = null
@@ -640,12 +641,25 @@ async function runDaemon(): Promise<void> {
             })
             await client.sendQueryResponse(queryId, result)
           } else if (ctrl.action === 'project:run_verification') {
-            const result = await runVerification({
-              dir: ctrl.dir as string,
-              command: ctrl.command as string | undefined,
-              timeoutMs: ctrl.timeoutMs as number | undefined,
+            let procToKill: { kill: (signal?: any) => void } | null = null
+            activeQueries.set(queryId, {
+              abort: () => {
+                try { procToKill?.kill() } catch {}
+              },
             })
-            await client.sendQueryResponse(queryId, result)
+            try {
+              const result = await runVerification({
+                dir: ctrl.dir as string,
+                command: ctrl.command as string | undefined,
+                timeoutMs: ctrl.timeoutMs as number | undefined,
+                onSpawn: (proc) => {
+                  procToKill = proc
+                },
+              })
+              await client.sendQueryResponse(queryId, result)
+            } finally {
+              activeQueries.delete(queryId)
+            }
           } else {
             await client.sendQueryResponse(queryId, null, `Unknown project action: ${ctrl.action}`)
           }
@@ -723,6 +737,22 @@ async function runDaemon(): Promise<void> {
           activeChatTask.controller.abort()
           stoppedCount++
         }
+      }
+
+      if (ctrl.queryId && activeQueries.has(ctrl.queryId)) {
+        console.log(`[worker] aborting active query "${ctrl.queryId}"`)
+        activeQueries.get(ctrl.queryId)!.abort()
+        activeQueries.delete(ctrl.queryId)
+        stoppedCount++
+      }
+
+      if (ctrl.all) {
+        for (const [qid, q] of activeQueries.entries()) {
+          console.log(`[worker] aborting active query "${qid}" due to ctrl.all`)
+          q.abort()
+          stoppedCount++
+        }
+        activeQueries.clear()
       }
 
       if (stoppedCount === 0) {
