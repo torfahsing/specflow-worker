@@ -90,9 +90,28 @@ export function normalizeTimeout(
  * type boundaries.  Unparseable lines and blank lines are skipped
  * silently (try/catch).
  */
+export function detectRepetitionLoop(text: string, minCycleLen = 15, maxCycleLen = 500, minRepeats = 3): boolean {
+  if (text.length < minCycleLen * minRepeats) return false
+  const maxL = Math.min(maxCycleLen, Math.floor(text.length / minRepeats))
+  for (let L = minCycleLen; L <= maxL; L++) {
+    const candidate = text.slice(-L)
+    let repeats = 1
+    let offset = text.length - L
+    while (offset >= L && text.slice(offset - L, offset) === candidate) {
+      repeats++
+      offset -= L
+      if (repeats >= minRepeats) {
+        return true
+      }
+    }
+  }
+  return false
+}
+
 export function createNdjsonParser(
   stream: ProviderStream,
   emit: (e: ProviderEvent) => void,
+  onLoopDetected?: () => void,
 ): (line: string) => void {
   let lastReasoningText = ''
 
@@ -105,6 +124,11 @@ export function createNdjsonParser(
       if (obj.type === 'text' && typeof obj.delta === 'string') {
         lastReasoningText = ''
         stream.resultText += obj.delta
+        if (detectRepetitionLoop(stream.resultText)) {
+          stream.resultError = 'Model entered infinite text repetition loop'
+          onLoopDetected?.()
+          return
+        }
         emit({ type: 'text', payload: { content: obj.delta } })
       } else if (obj.type === 'reasoning' && typeof obj.delta === 'string') {
         let out = obj.delta
@@ -326,7 +350,12 @@ export async function runProvider(
     tokens: null,
     cost: null,
   }
-  const parser = createNdjsonParser(stream, onEvent)
+  const parser = createNdjsonParser(stream, onEvent, () => {
+    try {
+      console.warn(`[cli] repetition degeneration loop detected in model output — killing child process`)
+      proc.kill('SIGTERM')
+    } catch {}
+  })
   const decoder = new TextDecoder('utf-8')
   let lineBuffer = ''
 
