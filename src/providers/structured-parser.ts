@@ -39,7 +39,9 @@ export function parseStructuredOutput(text: string, schema: OutputSchema): unkno
     }
   }
 
-  if (data === undefined && schema.name === 'review-findings') {
+  const isReviewFindings = schema.name === 'review-findings' ||
+    Boolean(schema.schema && schema.schema.properties && 'findings' in schema.schema.properties && 'recommendation' in schema.schema.properties);
+  if (data === undefined && isReviewFindings) {
     const lower = trimmed.toLowerCase();
     if (
       lower.includes('no problems found') ||

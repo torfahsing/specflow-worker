@@ -288,10 +288,11 @@ export async function executeClaimedTask(
   // Step 7: Structured output validation & 1-turn repair
   let parsedStructuredOutput: unknown | undefined
   if (!result.error && outputSchema) {
+    const schemaName = (outputSchema as any).name || (outputSchema as any).title || (outputSchema.properties?.findings ? 'review-findings' : 'task-output')
     try {
       parsedStructuredOutput = parseStructuredOutput(result.stream.resultText, {
-        name: 'task-output',
-        schema: outputSchema as any,
+        name: schemaName,
+        schema: (outputSchema.schema ?? outputSchema) as any,
       })
     } catch (parseErr: any) {
       const reason = parseErr?.message || String(parseErr)
@@ -321,8 +322,8 @@ export async function executeClaimedTask(
 
           if (repairResult && !repairResult.error) {
             parsedStructuredOutput = parseStructuredOutput(repairResult.stream.resultText, {
-              name: 'task-output',
-              schema: outputSchema as any,
+              name: schemaName,
+              schema: (outputSchema.schema ?? outputSchema) as any,
             })
             console.log(`[runner] 1-turn JSON repair succeeded for task "${taskId}"`)
           }
