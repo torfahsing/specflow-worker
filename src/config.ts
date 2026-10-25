@@ -22,7 +22,7 @@ export interface WorkerConfig {
 }
 
 const DEFAULT_SPECFLOW_URL = 'http://127.0.0.1:3200'
-export const DEFAULT_WORKER_CONCURRENCY = 4
+export const DEFAULT_WORKER_CONCURRENCY = 1
 
 /**
  * Parse a raw `KEY=VALUE` text block into a flat record.
