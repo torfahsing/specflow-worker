@@ -362,12 +362,24 @@ export async function executeClaimedTask(
   }
 
   // Clean success path - only commit if task is an implementation/feature task with a branch or write tools
-  const canModifyFiles = allowedTools.some(t => ['file_write', 'file_edit', 'shell'].includes(t))
+  const canModifyFiles = allowedTools.some(t => ['file_write', 'file_edit'].includes(t))
   if (!isChat && cwd && branch && canModifyFiles && gitModule.commitChanges) {
     const displayTaskId = (record.task_id || taskId) as string
     const title = (record.title || displayTaskId) as string
     try {
-      await gitModule.commitChanges(cwd, `task(${displayTaskId}): ${title}`)
+      const committed = await gitModule.commitChanges(cwd, `task(${displayTaskId}): ${title}`)
+      if (!committed) {
+        const error = `Task "${taskId}" completed without producing any file changes.`
+        if (gitModule.discardWorkingChanges) {
+          await gitModule.discardWorkingChanges(cwd)
+        }
+        await recorder.emitTerminalError({ message: error })
+        await recorder.finalize({ status: 'failed', error })
+        await store.updateTask(taskId, { status: 'failed', error })
+        if (!isChat) presence.setBusy(false)
+        effectiveSignal?.removeEventListener('abort', abortListener)
+        return { status: 'failed', runId: recorder.runId, error }
+      }
       console.log(`[runner] committed changes for task "${displayTaskId}"`)
     } catch (commitErr: any) {
       console.warn(`[runner] commit for task "${displayTaskId}" failed:`, commitErr?.message)

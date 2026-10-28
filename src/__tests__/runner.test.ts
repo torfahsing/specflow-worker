@@ -603,6 +603,7 @@ describe('executeClaimedTask — branch alignment', () => {
       const deps = makeDeps({ store, presence, git: realGit as any })
 
       const task = makeClaimedTask({
+        allowed_tools: ['file_read'],
         expand: {
           feature: {
             id: 'feat_1',
@@ -653,6 +654,89 @@ describe('executeClaimedTask — branch alignment', () => {
       const outcome = await executeClaimedTask(task as ClaimedTask, deps, signal)
 
       expect(outcome.status).toBe('done')
+    } finally {
+      await rm(testDir, { recursive: true, force: true })
+    }
+  })
+
+  it('fails when an implementation task with write tools produces zero file changes', async () => {
+    const testDir = await mkdtemp(path.join(tmpdir(), 'specflow-worker-runner-git-'))
+
+    try {
+      await Bun.spawn(['git', '-C', testDir, 'init']).exited
+      await Bun.spawn(['git', '-C', testDir, 'config', 'user.email', 'test@test.com']).exited
+      await Bun.spawn(['git', '-C', testDir, 'config', 'user.name', 'Test']).exited
+      await Bun.spawn(['git', '-C', testDir, 'commit', '--allow-empty', '-m', 'init']).exited
+      await Bun.spawn(['git', '-C', testDir, 'branch', 'feature/zero-diff']).exited
+
+      const store = makeMemoryStore()
+      const presence = new StubPresence()
+      const deps = makeDeps({ store, presence, git: realGit as any })
+
+      const task = makeClaimedTask({
+        allowed_tools: ['file_write', 'file_edit'],
+        expand: {
+          feature: {
+            id: 'feat_1',
+            project_dir: testDir,
+            git_branch: 'feature/zero-diff',
+          },
+        },
+      })
+      const signal = new AbortController().signal
+
+      const outcome = await executeClaimedTask(task as ClaimedTask, deps, signal)
+
+      expect(outcome.status).toBe('failed')
+      expect(outcome.error).toContain('completed without producing any file changes')
+    } finally {
+      await rm(testDir, { recursive: true, force: true })
+    }
+  })
+
+  it('succeeds and commits when an implementation task modifies files', async () => {
+    const testDir = await mkdtemp(path.join(tmpdir(), 'specflow-worker-runner-git-'))
+
+    try {
+      await Bun.spawn(['git', '-C', testDir, 'init']).exited
+      await Bun.spawn(['git', '-C', testDir, 'config', 'user.email', 'test@test.com']).exited
+      await Bun.spawn(['git', '-C', testDir, 'config', 'user.name', 'Test']).exited
+      await Bun.spawn(['git', '-C', testDir, 'commit', '--allow-empty', '-m', 'init']).exited
+      await Bun.spawn(['git', '-C', testDir, 'branch', 'feature/with-diff']).exited
+
+      const customProvider = async (_input: any, onEvent: (e: ProviderEvent) => Promise<void> | void) => {
+        await Bun.write(path.join(testDir, 'created.txt'), 'hello world')
+        await onEvent({ type: 'text', payload: { content: 'Wrote file' } })
+        return {
+          exitCode: 0,
+          signalCode: null,
+          cancelled: false,
+          timedOut: false,
+          stream: { resultText: 'Wrote file', tokens: null, cost: null },
+        }
+      }
+
+      const store = makeMemoryStore()
+      const presence = new StubPresence()
+      const deps = makeDeps({ store, presence, git: realGit as any, provider: customProvider as any })
+
+      const task = makeClaimedTask({
+        allowed_tools: ['file_write'],
+        expand: {
+          feature: {
+            id: 'feat_1',
+            project_dir: testDir,
+            git_branch: 'feature/with-diff',
+          },
+        },
+      })
+      const signal = new AbortController().signal
+
+      const outcome = await executeClaimedTask(task as ClaimedTask, deps, signal)
+
+      expect(outcome.status).toBe('done')
+      const gitLog = await Bun.$`git -C ${testDir} log -1 --pretty=%B`.text()
+      expect(gitLog).toContain('task(task_1)')
     } finally {
       await rm(testDir, { recursive: true, force: true })
     }
