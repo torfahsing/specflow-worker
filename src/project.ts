@@ -89,7 +89,7 @@ export const DEFAULT_MAX_SNIPPETS = 10
 
 /** Same skip set as the inline SKIP sets in the fs:* control actions (src/cli.ts). */
 export const SKIP_DIRS: Set<string> = new Set([
-  'node_modules', '.git', 'dist', 'build', '.next', 'coverage', '.cache', '__pycache__',
+  'node_modules', '.git', 'dist', 'build', '.next', 'coverage', '.cache', '__pycache__', '.agent-state', '.sessions',
 ])
 
 // ---------------------------------------------------------------------------

@@ -558,7 +558,7 @@ async function runDaemon(): Promise<void> {
               : (ctrl.pattern ? [ctrl.pattern] : [])
             const maxResults = typeof ctrl.maxResults === 'number' ? ctrl.maxResults : 50
 
-            const SKIP = new Set(['node_modules', '.git', 'dist', 'build', '.next', 'coverage', '.cache', '__pycache__'])
+            const SKIP = new Set(['node_modules', '.git', 'dist', 'build', '.next', 'coverage', '.cache', '__pycache__', '.agent-state', '.sessions'])
             const results: string[] = []
 
             const walk = async (currentDir: string, relative: string) => {
@@ -586,7 +586,7 @@ async function runDaemon(): Promise<void> {
             const maxDepth = typeof ctrl.maxDepth === 'number' ? ctrl.maxDepth : 3
             const maxTreeChars = typeof ctrl.maxTreeChars === 'number' ? ctrl.maxTreeChars : 32_000
 
-            const SKIP = new Set(['node_modules', '.git', 'dist', 'build', '.next', 'coverage', '.cache', '__pycache__'])
+            const SKIP = new Set(['node_modules', '.git', 'dist', 'build', '.next', 'coverage', '.cache', '__pycache__', '.agent-state', '.sessions'])
             const lines: string[] = []
 
             const walk = async (currentDir: string, prefix: string, depth: number) => {

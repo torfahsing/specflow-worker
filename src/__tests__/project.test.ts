@@ -23,7 +23,7 @@ import {
 } from '../project'
 import { EXT_LANGUAGE } from '../git/utils'
 
-/** The eight directories the fs:* walks (and this action) must never traverse. */
+/** The ten directories the fs:* walks (and this action) must never traverse. */
 const SKIPPED_DIR_NAMES = [
   'node_modules',
   '.git',
@@ -33,6 +33,8 @@ const SKIPPED_DIR_NAMES = [
   'coverage',
   '.cache',
   '__pycache__',
+  '.agent-state',
+  '.sessions',
 ]
 
 /** The eleven snippet-capable extensions. */
