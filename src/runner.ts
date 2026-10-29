@@ -363,18 +363,38 @@ export async function executeClaimedTask(
 
   // Clean success path - only commit if task is an implementation/feature task with a branch or write tools
   const canModifyFiles = allowedTools.some(t => ['file_write', 'file_edit'].includes(t))
+  let committed = false
+  let filesModified = 0
   if (!isChat && cwd && branch && canModifyFiles && gitModule.commitChanges) {
     const displayTaskId = (record.task_id || taskId) as string
     const title = (record.title || displayTaskId) as string
     try {
-      const committed = await gitModule.commitChanges(cwd, `task(${displayTaskId}): ${title}`)
+      const res = await gitModule.commitChanges(cwd, `task(${displayTaskId}): ${title}`)
+      committed = typeof res === 'boolean' ? res : Boolean(res?.committed)
+      filesModified = typeof res === 'object' && res !== null && typeof res.filesModified === 'number'
+        ? res.filesModified
+        : (committed ? 1 : 0)
+
       if (committed) {
-        console.log(`[runner] committed changes for task "${displayTaskId}"`)
+        console.log(`[runner] committed ${filesModified} file(s) for task "${displayTaskId}"`)
       } else {
         console.log(`[runner] no changes to commit for task "${displayTaskId}"`)
       }
     } catch (commitErr: any) {
       console.warn(`[runner] commit for task "${displayTaskId}" failed:`, commitErr?.message)
+    }
+
+    // Fail-fast guard: if this is an implementation task (write-capable and not a structured output phase),
+    // and 0 files were modified/committed, fail the attempt so retry / fallback kicks in.
+    const isImplementationTask = !outputSchema && (record.phase === 'orchestrate' || record.phase === 'develop' || !record.phase)
+    if (isImplementationTask && !committed && filesModified === 0) {
+      const error = `Implementation task "${displayTaskId}" completed without modifying any files in the working tree.`
+      console.error(`[runner] ${error}`)
+      await recorder.finalize({ status: 'failed', error })
+      await store.updateTask(taskId, { status: 'failed', error })
+      if (!isChat) presence.setBusy(false)
+      effectiveSignal?.removeEventListener('abort', abortListener)
+      return { status: 'failed', runId: recorder.runId, error }
     }
   }
 

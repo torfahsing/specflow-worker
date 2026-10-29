@@ -468,10 +468,14 @@ async function runDaemon(): Promise<void> {
           } else if (ctrl.action === 'git:commit_phase') {
             const isRepo = await git.isGitRepo(dir)
             if (!isRepo) {
-              await client.sendQueryResponse(queryId, { committed: false })
+              await client.sendQueryResponse(queryId, { committed: false, filesModified: 0 })
             } else {
-              const committed = await git.commitChanges(dir, ctrl.message || '')
-              await client.sendQueryResponse(queryId, { committed })
+              const res = await git.commitChanges(dir, ctrl.message || '')
+              const committed = typeof res === 'boolean' ? res : Boolean(res?.committed)
+              const filesModified = typeof res === 'object' && res !== null && typeof res.filesModified === 'number'
+                ? res.filesModified
+                : (committed ? 1 : 0)
+              await client.sendQueryResponse(queryId, { committed, filesModified })
             }
           } else if (ctrl.action === 'git:get_changed_files') {
             const isRepo = await git.isGitRepo(dir)

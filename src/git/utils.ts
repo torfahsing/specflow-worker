@@ -67,9 +67,14 @@ export async function discardWorkingChanges(dir: string): Promise<void> {
   }
 }
 
+export interface CommitResult {
+  committed: boolean
+  filesModified: number
+}
+
 const dirCommitLocks = new Map<string, Promise<void>>()
 
-export async function commitChanges(dir: string, message: string): Promise<boolean> {
+export async function commitChanges(dir: string, message: string): Promise<CommitResult> {
   const prevLock = dirCommitLocks.get(dir) || Promise.resolve()
   let releaseLock: () => void = () => {}
   const currentLock = new Promise<void>((resolve) => {
@@ -81,12 +86,15 @@ export async function commitChanges(dir: string, message: string): Promise<boole
   try {
     for (let attempt = 1; attempt <= 3; attempt++) {
       try {
-        const status = (await Bun.$`git -C ${dir} status --porcelain`.text()).trim()
-        if (!status) return false
+        const rawStatus = await Bun.$`git -C ${dir} status --porcelain`.text()
+        const statusLines = rawStatus.split('\n').map((l) => l.trim()).filter(Boolean)
+        if (statusLines.length === 0) {
+          return { committed: false, filesModified: 0 }
+        }
         await Bun.$`git -C ${dir} add -A`.text()
         await Bun.$`git -C ${dir} commit -m ${message}`.text()
-        console.log(`[git] committed changes in '${dir}': ${message}`)
-        return true
+        console.log(`[git] committed ${statusLines.length} file(s) in '${dir}': ${message}`)
+        return { committed: true, filesModified: statusLines.length }
       } catch (err: any) {
         const errMsg = (err as Error)?.message || String(err)
         if (attempt < 3 && errMsg.includes('.git/index.lock')) {
@@ -94,10 +102,10 @@ export async function commitChanges(dir: string, message: string): Promise<boole
           continue
         }
         console.warn(`[git] commit failed: ${errMsg}`)
-        return false
+        return { committed: false, filesModified: 0 }
       }
     }
-    return false
+    return { committed: false, filesModified: 0 }
   } finally {
     releaseLock()
     if (dirCommitLocks.get(dir) === currentLock) {

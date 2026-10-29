@@ -659,7 +659,7 @@ describe('executeClaimedTask — branch alignment', () => {
     }
   })
 
-  it('completes cleanly when an implementation task produces zero file changes', async () => {
+  it('fails fast when an implementation task produces zero file changes', async () => {
     const testDir = await mkdtemp(path.join(tmpdir(), 'specflow-worker-runner-git-'))
 
     try {
@@ -687,8 +687,8 @@ describe('executeClaimedTask — branch alignment', () => {
 
       const outcome = await executeClaimedTask(task as ClaimedTask, deps, signal)
 
-      expect(outcome.status).toBe('done')
-      expect(outcome.output).toBe('ok')
+      expect(outcome.status).toBe('failed')
+      expect(outcome.error).toContain('completed without modifying any files in the working tree')
     } finally {
       await rm(testDir, { recursive: true, force: true })
     }
