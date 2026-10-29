@@ -22,21 +22,39 @@ export function parseStructuredOutput(text: string, schema: OutputSchema): unkno
 
   // Try direct JSON parse first
   let data = tryParseJson(trimmed);
-
-  // Fallback 1: extract from fenced code blocks
-  if (data === undefined) {
-    const extracted = extractJsonFromFencedBlocks(trimmed);
-    if (extracted) {
-      data = tryParseJson(extracted);
+  if (data !== undefined) {
+    data = maybeAutoWrapArray(data, schema.schema);
+    if (isValidAgainstSchema(data, schema.schema)) {
+      validateAgainstSchema(data, schema.schema, schema.name);
+      return data;
     }
   }
 
-  // Fallback 2: find JSON object/array embedded in prose
-  if (data === undefined) {
-    const extracted = extractJsonFromText(trimmed);
-    if (extracted) {
-      data = tryParseJson(extracted);
+  let fallbackData: unknown | undefined = data;
+  data = undefined;
+
+  // Extract all candidate blocks (fenced code blocks + balanced JSON structures)
+  const candidates = collectJsonCandidates(trimmed);
+
+  // Evaluate candidates in reverse order (agent's final answer is at the end)
+  for (let i = candidates.length - 1; i >= 0; i--) {
+    let candidateData = tryParseJson(candidates[i]);
+    if (candidateData === undefined) continue;
+
+    candidateData = maybeAutoWrapArray(candidateData, schema.schema);
+    if (isValidAgainstSchema(candidateData, schema.schema)) {
+      data = candidateData;
+      break;
     }
+    if (fallbackData === undefined) {
+      fallbackData = candidateData;
+    }
+  }
+
+  // If no candidate fully validated against schema, but we found a valid JSON structure,
+  // use the last parsed candidate so validateAgainstSchema produces informative errors
+  if (data === undefined && fallbackData !== undefined) {
+    data = fallbackData;
   }
 
   const isReviewFindings = schema.name === 'review-findings' ||
@@ -75,14 +93,6 @@ export function parseStructuredOutput(text: string, schema: OutputSchema): unkno
         data = { recommendation: 'needs_changes', findings: [] };
       }
     }
-
-    // Fallback 3: fail closed — surface the parse failure as a visible finding
-    if (data === undefined) {
-      data = {
-        recommendation: 'needs_changes',
-        findings: [buildReviewParseErrorFinding(trimmed)],
-      };
-    }
   }
 
   if (data === undefined) {
@@ -91,23 +101,111 @@ export function parseStructuredOutput(text: string, schema: OutputSchema): unkno
     );
   }
 
-  // Auto-wrap array if the schema expects a single-property object containing an array
-  if (schema.schema.type === 'object' && Array.isArray(data)) {
+  data = maybeAutoWrapArray(data, schema.schema);
+  validateAgainstSchema(data, schema.schema, schema.name);
+  return data;
+}
+
+export function maybeAutoWrapArray(data: unknown, schema: JsonSchema): unknown {
+  if (schema.type === 'object' && Array.isArray(data)) {
     const isArrayOfObjects = data.length === 0 || (typeof data[0] === 'object' && data[0] !== null && !Array.isArray(data[0]));
     if (isArrayOfObjects) {
-      const requiredKeys = schema.schema.required || [];
+      const requiredKeys = schema.required || [];
       if (requiredKeys.length === 1) {
         const singleKey = requiredKeys[0]!;
-        const propSchema = schema.schema.properties?.[singleKey];
+        const propSchema = schema.properties?.[singleKey];
         if (propSchema && (propSchema as any).type === 'array') {
-          data = { [singleKey]: data };
+          return { [singleKey]: data };
+        }
+      }
+    }
+  }
+  return data;
+}
+
+export function isValidAgainstSchema(data: unknown, schema: JsonSchema): boolean {
+  try {
+    return collectErrors(data, schema, '').length === 0;
+  } catch {
+    return false;
+  }
+}
+
+export function collectJsonCandidates(text: string): string[] {
+  const candidates: string[] = [];
+
+  // 1. Fenced code blocks
+  const fenceRegex = /```(?:json)?\s*\n([\s\S]*?)\n```/g;
+  let match: RegExpExecArray | null;
+  while ((match = fenceRegex.exec(text)) !== null) {
+    const content = match[1]?.trim();
+    if (content && (content.startsWith('{') || content.startsWith('['))) {
+      candidates.push(content);
+    }
+  }
+
+  // 2. Balanced { ... } and [ ... ] blocks
+  let depth = 0;
+  let inString = false;
+  let escape = false;
+  let startIdx = -1;
+  let openChar: '{' | '[' | null = null;
+  let closeChar: '}' | ']' | null = null;
+
+  for (let i = 0; i < text.length; i++) {
+    const char = text[i];
+    if (escape) {
+      escape = false;
+      continue;
+    }
+    if (char === '\\') {
+      escape = true;
+      continue;
+    }
+    if (char === '"') {
+      inString = !inString;
+      continue;
+    }
+    if (inString) continue;
+
+    if (depth === 0) {
+      if (char === '{') {
+        openChar = '{';
+        closeChar = '}';
+        depth = 1;
+        startIdx = i;
+      } else if (char === '[') {
+        openChar = '[';
+        closeChar = ']';
+        depth = 1;
+        startIdx = i;
+      }
+    } else {
+      if (char === openChar) {
+        depth++;
+      } else if (char === closeChar) {
+        depth--;
+        if (depth === 0 && startIdx !== -1) {
+          candidates.push(text.slice(startIdx, i + 1));
+          startIdx = -1;
+          openChar = null;
+          closeChar = null;
         }
       }
     }
   }
 
-  validateAgainstSchema(data, schema.schema, schema.name);
-  return data;
+  // Truncated trailing candidate (if depth > 0 at end of text)
+  if (depth > 0 && startIdx !== -1 && closeChar !== null) {
+    const lastClose = text.lastIndexOf(closeChar);
+    if (lastClose > startIdx) {
+      candidates.push(text.slice(startIdx, lastClose + 1));
+    } else {
+      candidates.push(text.slice(startIdx));
+    }
+  }
+
+  return candidates;
 }
 
 export function repairJson(text: string): string {
@@ -164,7 +262,12 @@ export function tryParseJson(text: string): unknown | undefined {
   try {
     return JSON.parse(candidate);
   } catch {
-    return undefined;
+    try {
+      const stripped = candidate.replace(/,(\s*[}\]])/g, '$1');
+      return JSON.parse(stripped);
+    } catch {
+      return undefined;
+    }
   }
 }
 
