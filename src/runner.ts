@@ -368,19 +368,11 @@ export async function executeClaimedTask(
     const title = (record.title || displayTaskId) as string
     try {
       const committed = await gitModule.commitChanges(cwd, `task(${displayTaskId}): ${title}`)
-      if (!committed) {
-        const error = `Task "${taskId}" completed without producing any file changes.`
-        if (gitModule.discardWorkingChanges) {
-          await gitModule.discardWorkingChanges(cwd)
-        }
-        await recorder.emitTerminalError({ message: error })
-        await recorder.finalize({ status: 'failed', error })
-        await store.updateTask(taskId, { status: 'failed', error })
-        if (!isChat) presence.setBusy(false)
-        effectiveSignal?.removeEventListener('abort', abortListener)
-        return { status: 'failed', runId: recorder.runId, error }
+      if (committed) {
+        console.log(`[runner] committed changes for task "${displayTaskId}"`)
+      } else {
+        console.log(`[runner] no changes to commit for task "${displayTaskId}"`)
       }
-      console.log(`[runner] committed changes for task "${displayTaskId}"`)
     } catch (commitErr: any) {
       console.warn(`[runner] commit for task "${displayTaskId}" failed:`, commitErr?.message)
     }
