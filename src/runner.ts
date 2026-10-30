@@ -383,19 +383,6 @@ export async function executeClaimedTask(
     } catch (commitErr: any) {
       console.warn(`[runner] commit for task "${displayTaskId}" failed:`, commitErr?.message)
     }
-
-    // Fail-fast guard: if this is an implementation task (write-capable and not a structured output phase),
-    // and 0 files were modified/committed, fail the attempt so retry / fallback kicks in.
-    const isImplementationTask = !outputSchema && (record.phase === 'orchestrate' || record.phase === 'develop' || !record.phase)
-    if (isImplementationTask && !committed && filesModified === 0) {
-      const error = `Implementation task "${displayTaskId}" completed without modifying any files in the working tree.`
-      console.error(`[runner] ${error}`)
-      await recorder.finalize({ status: 'failed', error })
-      await store.updateTask(taskId, { status: 'failed', error })
-      if (!isChat) presence.setBusy(false)
-      effectiveSignal?.removeEventListener('abort', abortListener)
-      return { status: 'failed', runId: recorder.runId, error }
-    }
   }
 
   const tokens = result.stream.tokens
