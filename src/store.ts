@@ -141,7 +141,14 @@ export class HttpWorkerStore implements WorkerStore {
       this.runs.delete(runId)
     }
 
-    const status = patch.status === 'completed' ? 'completed' : 'failed'
+    // 'cancelled' is forwarded as-is so the orchestrator can distinguish
+    // aborted runs (accepted once the orchestrator ships cancelled-finish
+    // support; against older orchestrators the best-effort POST 400s and
+    // is swallowed by the catch below — same as any finish failure).
+    const status =
+      patch.status === 'completed' || patch.status === 'cancelled'
+        ? patch.status
+        : 'failed'
     if (taskId) {
       await this.client.finishTask(taskId, {
         run_id: runId,

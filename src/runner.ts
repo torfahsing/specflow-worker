@@ -57,6 +57,25 @@ function coerceArray(value: unknown): string[] {
   return []
 }
 
+/**
+ * Extract run usage from a provider stream — the identical source the
+ * success path reads (`stream.tokens` / `stream.cost`, populated from the
+ * agent's terminal `done` event). Best-effort by contract: absent values
+ * are omitted so a missing usage never fails the finalize or the finish
+ * POST (spec §2 — partial usage propagation on cancelled/failed finishes).
+ */
+function streamUsage(stream: ProviderStream): {
+  tokens?: { input: number; output: number }
+  costUsd?: number
+} {
+  return {
+    tokens: stream.tokens
+      ? { input: stream.tokens.input, output: stream.tokens.output }
+      : undefined,
+    costUsd: typeof stream.cost === 'number' ? stream.cost : undefined,
+  }
+}
+
 // ---------------------------------------------------------------------------
 // executeClaimedTask
 // ---------------------------------------------------------------------------
@@ -275,7 +294,13 @@ export async function executeClaimedTask(
       signal: result.signalCode,
     })
 
-    await recorder.finalize({ status: 'cancelled' })
+    // Forward whatever partial usage the provider already streamed/billed
+    // before the abort (identical source as the success path). Best-effort:
+    // absent stream usage is omitted and never fails the finalize.
+    await recorder.finalize({
+      status: 'cancelled',
+      ...streamUsage(result.stream),
+    })
     await store.updateTask(taskId, {
       status: 'queued',
       assigned_worker: null,
@@ -354,7 +379,14 @@ export async function executeClaimedTask(
       exit_code: result.exitCode,
       signal: result.signalCode,
     })
-    await recorder.finalize({ status: 'failed', error: result.error })
+    // Forward whatever partial usage the provider already streamed/billed
+    // before the failure (identical source as the success path). Best-effort:
+    // absent stream usage is omitted and never fails the finalize.
+    await recorder.finalize({
+      status: 'failed',
+      error: result.error,
+      ...streamUsage(result.stream),
+    })
     await store.updateTask(taskId, { status: 'failed', error: result.error })
     if (!isChat) presence.setBusy(false)
     effectiveSignal?.removeEventListener('abort', abortListener)
@@ -385,8 +417,7 @@ export async function executeClaimedTask(
     }
   }
 
-  const tokens = result.stream.tokens
-  const costUsd = result.stream.cost
+  const usage = streamUsage(result.stream)
   const rawOutput = parsedStructuredOutput !== undefined
     ? parsedStructuredOutput
     : (result.stream.resultText || undefined)
@@ -398,7 +429,7 @@ export async function executeClaimedTask(
 
   if (!hasOutput) {
     const error = `Task "${taskId}" completed with empty output.`
-    await recorder.finalize({ status: 'failed', error })
+    await recorder.finalize({ status: 'failed', error, ...usage })
     await store.updateTask(taskId, { status: 'failed', error })
     if (!isChat) presence.setBusy(false)
     effectiveSignal?.removeEventListener('abort', abortListener)
@@ -410,10 +441,7 @@ export async function executeClaimedTask(
   await recorder.finalize({
     status: 'completed',
     output: taskOutput,
-    tokens: tokens
-      ? { input: tokens.input, output: tokens.output }
-      : undefined,
-    costUsd: typeof costUsd === 'number' ? costUsd : undefined,
+    ...usage,
   })
 
   await store.updateTask(taskId, {

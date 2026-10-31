@@ -43,7 +43,7 @@ export interface WorkerEventItem {
 
 export interface WorkerFinishPayload {
   run_id: string;
-  status: 'completed' | 'failed';
+  status: 'completed' | 'failed' | 'cancelled';
   output?: any;
   error?: string;
   input_tokens?: number;
