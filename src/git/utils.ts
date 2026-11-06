@@ -258,7 +258,9 @@ export async function getRepoStatus(dir: string): Promise<RepoStatus> {
 
   let dirtyFiles: string[] = []
   try {
-    const raw = (await Bun.$`git -C ${dir} status --porcelain`.text()).trim()
+    // Do NOT trim the raw porcelain output: the first line often starts with a
+    // space (e.g. ' M tracked.txt'), and trimming would shift the slice(3) offset.
+    const raw = await Bun.$`git -C ${dir} status --porcelain`.text()
     dirtyFiles = raw
       .split('\n')
       .filter(Boolean)

@@ -7,6 +7,8 @@ import {
   branchExists,
   createBranch,
   checkoutBranch,
+  getRepoStatus,
+  isGitRepo,
 } from '../git/utils'
 
 async function initRepo(dir: string): Promise<void> {
@@ -83,6 +85,62 @@ describe('git/utils', () => {
     it('returns false without throwing', async () => {
       // testDir is a plain directory (no git init)
       expect(await branchExists(testDir, 'anything')).toBe(false)
+    })
+  })
+
+  describe('getRepoStatus', () => {
+    it('returns branch, empty dirtyFiles and lastCommit for a clean repo', async () => {
+      await initRepo(testDir)
+      const status = await getRepoStatus(testDir)
+      expect(status.branch).toBe(await getCurrentBranch(testDir))
+      expect(status.dirtyFiles).toEqual([])
+      expect(status.lastCommit).toBeDefined()
+      expect(status.lastCommit?.sha).toMatch(/^[0-9a-f]{40}$/i)
+      expect(status.lastCommit?.message.length).toBeGreaterThan(0)
+      expect(status.lastCommit?.author).toMatch(/^.+ <.+@.+>$/)
+      expect(status.lastCommit?.date).toMatch(/\d{4}-\d{2}-\d{2}T/)
+      expect(Number.isNaN(Date.parse(status.lastCommit!.date))).toBe(false)
+    })
+
+    it('returns branch null on detached HEAD while keeping lastCommit', async () => {
+      await initRepo(testDir)
+      await Bun.spawn(['git', '-C', testDir, 'checkout', '--detach', 'HEAD']).exited
+      const status = await getRepoStatus(testDir)
+      expect(status.branch).toBeNull()
+      expect(status.lastCommit).toBeDefined()
+    })
+
+    it('lists modified and untracked files in dirtyFiles', async () => {
+      await initRepo(testDir)
+      const tracked = path.join(testDir, 'tracked.txt')
+      await Bun.write(tracked, 'v1\n')
+      await Bun.spawn(['git', '-C', testDir, 'add', 'tracked.txt']).exited
+      await Bun.spawn(['git', '-C', testDir, 'commit', '-m', 'add tracked file']).exited
+      await Bun.write(tracked, 'v2\n')
+      await Bun.write(path.join(testDir, 'untracked.txt'), 'new\n')
+      const status = await getRepoStatus(testDir)
+      expect(status.dirtyFiles).toEqual(expect.arrayContaining(['tracked.txt', 'untracked.txt']))
+    })
+
+    it('omits lastCommit for a zero-commit repo', async () => {
+      await Bun.spawn(['git', '-C', testDir, 'init']).exited
+      const status = await getRepoStatus(testDir)
+      expect(status.dirtyFiles).toEqual([])
+      expect('lastCommit' in status).toBe(false)
+      expect(
+        status.branch === null ||
+          (typeof status.branch === 'string' && status.branch.length > 0)
+      ).toBe(true)
+    })
+  })
+
+  describe('getRepoStatus on a non-git directory', () => {
+    it('reports isGitRepo false for a plain directory', async () => {
+      expect(await isGitRepo(testDir)).toBe(false)
+    })
+
+    it('throws when called directly, proving the dispatcher guard is necessary', async () => {
+      await expect(getRepoStatus(testDir)).rejects.toThrow()
     })
   })
 })
