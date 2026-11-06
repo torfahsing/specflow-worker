@@ -525,6 +525,14 @@ async function runDaemon(): Promise<void> {
           } else if (ctrl.action === 'git:is_repo') {
             const isRepo = await git.isGitRepo(dir)
             await client.sendQueryResponse(queryId, { isRepo })
+          } else if (ctrl.action === 'git:query_repo_status') {
+            const isRepo = await git.isGitRepo(dir)
+            if (!isRepo) {
+              await client.sendQueryResponse(queryId, { branch: null, dirtyFiles: [] })
+            } else {
+              const status = await git.getRepoStatus(dir)
+              await client.sendQueryResponse(queryId, status)
+            }
           } else {
             await client.sendQueryResponse(queryId, null, `Unknown git action: ${ctrl.action}`)
           }
