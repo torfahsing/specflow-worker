@@ -224,6 +224,68 @@ export async function hasUncommittedChanges(dir: string): Promise<boolean> {
   }
 }
 
+export interface RepoCommit {
+  sha: string
+  message: string
+  author: string // "Name <email>"
+  date: string // ISO-strict (e.g. 2026-01-15T10:30:00+00:00)
+}
+
+export interface RepoStatus {
+  branch: string | null
+  dirtyFiles: string[]
+  lastCommit?: RepoCommit
+}
+
+/**
+ * On-demand repo status snapshot for the Run Inspector
+ * (git:query_repo_status control-channel query).
+ *
+ * Throwing helper: non-repo / broken-git failures propagate to the caller
+ * (the cli.ts git: dispatcher guard + outer catch handle them). One graceful
+ * degradation: a repo with zero commits (unborn HEAD) makes rev-parse exit
+ * non-zero, so branch falls back to null and lastCommit is omitted entirely.
+ */
+export async function getRepoStatus(dir: string): Promise<RepoStatus> {
+  let branch: string | null = null
+  try {
+    const head = (await Bun.$`git -C ${dir} rev-parse --abbrev-ref HEAD`.text()).trim()
+    branch = head === 'HEAD' ? null : head
+  } catch {
+    // Unborn HEAD (zero-commit repo): rev-parse cannot resolve HEAD — degrade to null.
+    branch = null
+  }
+
+  let dirtyFiles: string[] = []
+  try {
+    // Do NOT trim the raw porcelain output: the first line often starts with a
+    // space (e.g. ' M tracked.txt'), and trimming would shift the slice(3) offset.
+    const raw = await Bun.$`git -C ${dir} status --porcelain`.text()
+    dirtyFiles = raw
+      .split('\n')
+      .filter(Boolean)
+      .map((line) => {
+        const entry = line.slice(3).trim()
+        const arrow = entry.indexOf(' -> ')
+        return arrow !== -1 ? entry.slice(arrow + 4).trim() : entry
+      })
+  } catch (err) {
+    throw new Error(`Failed to get repo status: ${(err as Error).message}`)
+  }
+
+  try {
+    const fmt = '--format=%H%x1f%s%x1f%an <%ae>%x1f%cI'
+    const raw = (await Bun.$`git -C ${dir} log -1 ${fmt}`.text()).trim()
+    const [sha, message, author, date] = raw.split('\x1f')
+    if (sha && message && author && date) {
+      return { branch, dirtyFiles, lastCommit: { sha, message, author, date } }
+    }
+  } catch {
+    // Zero-commit repo: git log -1 exits non-zero — omit lastCommit entirely.
+  }
+  return { branch, dirtyFiles }
+}
+
 export async function rebaseBranch(dir: string, branch: string, onto = 'main'): Promise<void> {
   try {
     await Bun.$`git -C ${dir} rebase ${onto} ${branch}`.quiet()
